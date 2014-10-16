@@ -19,7 +19,7 @@ if(DEPTHSENSESDK_FOUND)
   ## Build executable
   add_executable(softkinetic_driver_node src/softkinetic_driver_node.cpp)
   add_dependencies(softkinetic_driver_node ${catkin_EXPORTED_TARGETS})
-  target_link_libraries(softkinetic_driver_node ${catkin_LIBRARIES} ${DepthSenseSDK_LIBRARIES})
+  target_link_libraries(softkinetic_driver_node ${catkin_LIBRARIES} ${DEPTHSENSESDK_LIBRARIES})
   ## Install the node
   install(TARGETS softkinetic_driver_node
     ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
