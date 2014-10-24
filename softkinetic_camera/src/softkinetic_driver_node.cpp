@@ -45,11 +45,7 @@
  *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  ****************************************************************/
-
-#ifdef _MSC_VER
-#include <windows.h>
-#endif
-
+// System include files
 #include <stdio.h>
 #include <signal.h>
 #include <vector>
@@ -57,14 +53,15 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
-
 // ROS include files
 #include <ros/ros.h>
 #include <std_msgs/Int32.h>
+#include <message_filters/subscriber.h>
+#include <message_filters/time_synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
+// Pointcloud include files
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/point_cloud_conversion.h>
-#include <image_transport/image_transport.h>
-
 #include <pcl_ros/point_cloud.h>
 #include <pcl_ros/io/pcd_io.h>
 #include <pcl/io/io.h>
@@ -72,187 +69,231 @@
 #include <pcl/range_image/range_image.h>
 #include <pcl/filters/radius_outlier_removal.h>
 #include <pcl/filters/voxel_grid.h>
-
-#include <message_filters/subscriber.h>
-#include <message_filters/time_synchronizer.h>
-#include <message_filters/sync_policies/approximate_time.h>
-
+// OpenCV + camera include files
+#include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/imgproc/imgproc.hpp>
-
 #include <sensor_msgs/image_encodings.h>
 #include <camera_info_manager/camera_info_manager.h>
-
+// Camera SDK include files
 #include <DepthSense.hxx>
 
-using namespace DepthSense;
-using namespace message_filters;
-using namespace std;
+typedef struct _complete_color_config{
+    DepthSense::ColorNode::Configuration base_config;
+    DepthSense::ExposureAuto auto_exposure_mode;
+    int32_t brightness;
+    int32_t contrast;
+    int32_t saturation;
+    int32_t hue;
+    int32_t gamma;
+    int32_t white_balance;
+    int32_t sharpness;
+    int32_t exposure;
+    bool enable_priority_auto_exposure_mode;
+    bool enable_auto_white_balance;
+    bool enable_color_map;
+    bool enable_compressed_data;
+} complete_color_config;
 
-namespace enc = sensor_msgs::image_encodings;
+typedef struct _complete_depth_config{
+    DepthSense::DepthNode::Configuration base_config;
+    int32_t illumination_level;
+    bool enable_xyz_depth;
+    bool enable_floatingpoint_xyz_depth;
+    bool enable_accelerometer;
+    bool enable_confidence_map;
+    bool enable_depth_map;
+    bool enable_floatingpoint_depth_map;
+    bool enable_phase_map;
+    bool enable_uv_map;
+    bool enable_vertices;
+    bool enable_floatingpoint_vertices;
+} complete_depth_config;
 
-Context g_context;
-DepthNode g_dnode;
-ColorNode g_cnode;
-AudioNode g_anode;
+// DepthSense SDK global variables
+DepthSense::Context g_context;
+DepthSense::ColorNode g_color_node;
+DepthSense::DepthNode g_depth_node;
+complete_color_config g_color_config;
+complete_depth_config g_depth_config;
+// ROS global variables
+ros::Publisher g_pointcloud_pub;
+ros::Publisher g_rgb_pointcloud_pub;
+image_transport::CameraPublisher g_rgb_pub;
+image_transport::CameraPublisher g_depth_pub;
+image_transport::CameraPublisher g_confidence_pub;
+// Config global variables
+std::string g_rgb_frame_name;
+std::string g_rgb_optical_frame_name;
+std::string g_depth_frame_name;
+std::string g_depth_optical_frame_name;
+sensor_msgs::CameraInfo g_rgb_camerainfo;
+sensor_msgs::CameraInfo g_depth_camerainfo;
+// Save the current color map for coloring pointclouds
+cv::Mat g_current_color_image;
 
-uint32_t g_aFrames = 0;
-uint32_t g_cFrames = 0;
-uint32_t g_dFrames = 0;
-
-bool g_bDeviceFound = false;
-
-ProjectionHelper* g_pProjHelper = NULL;
-
-ros::Publisher pub_cloud;
-ros::Publisher pub_rgb_info;
-ros::Publisher pub_depth_info;
-image_transport::Publisher pub_rgb;
-image_transport::Publisher pub_mono;
-image_transport::Publisher pub_depth;
-
-sensor_msgs::CameraInfo rgb_info;
-sensor_msgs::CameraInfo depth_info;
-
-sensor_msgs::Image img_rgb;
-sensor_msgs::Image img_mono;
-sensor_msgs::Image img_depth;
-sensor_msgs::PointCloud2 cloud;
-
-cv::Mat cv_img_rgb; // Open CV image containers
-cv::Mat cv_img_yuy2;
-cv::Mat cv_img_mono;
-cv::Mat cv_img_depth;
-
-std_msgs::Int32 test_int;
-
-/* Confidence threshold for DepthNode configuration */
-int confidence_threshold;
-
-/* Parameters for downsampling cloud */
-bool use_voxel_grid_filter;
-double voxel_grid_side;
-
-/* Parameters for radius filter */
-bool use_radius_filter;
-double search_radius;
-int min_neighbours;
-
-/* Shutdown request*/
-bool ros_node_shutdown = false;
-
-/* Depth sensor parameters */
-bool depth_enabled;
-DepthSense::DepthNode::CameraMode depth_mode;
-DepthSense::FrameFormat depth_frame_format;
-int depth_frame_rate;
-
-/* Color sensor parameters */
-bool color_enabled;
-DepthSense::CompressionType color_compression;
-DepthSense::FrameFormat color_frame_format;
-int color_frame_rate;
-
-
-/*----------------------------------------------------------------------------*/
-// New audio sample event handler
-void onNewAudioSample(AudioNode node, AudioNode::NewSampleReceivedData data)
+void OnNewColorSample(DepthSense::ColorNode node, DepthSense::ColorNode::NewSampleReceivedData data)
 {
-  //printf("A#%u: %d\n",g_aFrames,data.audioData.size());
-  g_aFrames++;
+    // Make new OpenCV container
+    int32_t width = 0;
+    int32_t height = 0;
+    DepthSense::FrameFormat_toResolution(data.captureConfiguration.frameFormat, &width, &height);
+    cv::Mat new_image_bgr8(height, width, CV_8UC3);
+    // If the image is in YUY2 mode, we need to convert it to BGR8 first
+    if (data.captureConfiguration.compression == DepthSense::COMPRESSION_TYPE_YUY2)
+    {
+        // Make the intermediate container for the YUY2 image
+        cv::Mat new_image_yuy2(height, width, CV_8UC2);
+        // Copy the data in
+        new_image_yuy2.data = const_cast<u_int8_t*>(static_cast<const u_int8_t*>(data.colorMap));
+        // Convert to BGR
+        cv::cvtColor(new_image_yuy2, new_image_bgr8, CV_YUV2BGR_YUY2);
+    }
+    // If the image is in MJPEG mode, it's already in BGR8
+    else
+    {
+        // Copy the data in
+        new_image_bgr8.data = const_cast<u_int8_t*>(static_cast<const u_int8_t*>(data.colorMap));
+    }
+    // Save the current color image
+    g_current_color_image = new_image_bgr8.clone();
+    // Convert the OpenCV image to ROS
+    std_msgs::Header new_image_header;
+    new_image_header.frame_id = g_rgb_optical_frame_name;
+    new_image_header.stamp = ros::Time::now();
+    sensor_msgs::Image new_image;
+    cv_bridge::CvImage new_image_converted(new_image_header, sensor_msgs::image_encodings::BGR8, new_image_bgr8);
+    new_image_converted.toImageMsg(new_image);
+    sensor_msgs::CameraInfo new_image_camerainfo = g_rgb_camerainfo;
+    new_image_camerainfo.header = new_image_header;
+    // Publish the image
+    g_rgb_pub.publish(new_image, new_image_camerainfo);
 }
 
-/*----------------------------------------------------------------------------*/
-// New color sample event handler
-void onNewColorSample(ColorNode node, ColorNode::NewSampleReceivedData data)
+inline bool is_vertex_valid(float x, float y, float z)
 {
-  // If this is the first sample, we must fill all the constant values on image and
-  // camera info messages to increase working rate
-  if (img_rgb.data.size() == 0)
-  {
-    // Create two sensor_msg::Image for color and grayscale images on new camera image
-    int32_t w, h;
-    FrameFormat_toResolution(data.captureConfiguration.frameFormat, &w, &h);
-
-    img_rgb.width  = w;
-    img_rgb.height = h;
-    img_rgb.encoding = "bgr8";
-    img_rgb.data.resize(w * h * 3);
-    img_rgb.step = w * 3;
-
-    img_mono.width  = w;
-    img_mono.height = h;
-    img_mono.encoding = "mono8";
-    img_mono.data.resize(w * h);
-    img_mono.step = w;
-
-    cv_img_rgb.create(h, w, CV_8UC3);
-    if (color_compression == COMPRESSION_TYPE_YUY2)
-      cv_img_yuy2.create(h, w, CV_8UC2);
-  }
-
-  if (color_compression == COMPRESSION_TYPE_YUY2)
-  {
-    // Color images come compressed as YUY2, so we must convert them to BGR
-    cv_img_yuy2.data = reinterpret_cast<uchar *>(
-          const_cast<uint8_t *>(static_cast<const uint8_t *>(data.colorMap)));
-    cvtColor(cv_img_yuy2, cv_img_rgb, CV_YUV2BGR_YUY2);
-  }
-  else
-  {
-    // Nothing special to do for MJPEG stream; just cast and reuse the camera data
-    cv_img_rgb.data = reinterpret_cast<uchar *>(
-          const_cast<uint8_t *>(static_cast<const uint8_t *>(data.colorMap)));
-  }
-  // Create also a gray-scale image from the BGR one
-  cvtColor(cv_img_rgb, cv_img_mono, CV_BGR2GRAY);
-
-  // Dump both on ROS image messages
-  std::memcpy(img_rgb.data.data(),  cv_img_rgb.ptr(),  img_rgb.data.size());
-  std::memcpy(img_mono.data.data(), cv_img_mono.ptr(), img_mono.data.size());
-
-  // Ensure that all the images and camera info are timestamped and have the proper frame id
-  img_rgb.header.stamp = ros::Time::now();
-  img_mono.header      = img_rgb.header;
-  rgb_info.header      = img_rgb.header;
-
-  // Publish the rgb and mono images and camera info
-  pub_rgb.publish(img_rgb);
-  pub_mono.publish(img_mono);
-
-  pub_rgb_info.publish(rgb_info);
-
-  g_cFrames++;
+    if (x != -2.0 || y != -2.0 || z != -2.0)
+    {
+        return true;
+    }
+    else
+    {
+        return false;
+    }
 }
 
-/*----------------------------------------------------------------------------*/
-
-void downsampleCloud(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_to_filter)
+inline bool is_uv_valid(float u, float v)
 {
-  ROS_DEBUG_STREAM("Starting downsampling");
-  pcl::VoxelGrid<pcl::PointXYZRGB> sor;
-  sor.setInputCloud (cloud_to_filter);
-  sor.setLeafSize (voxel_grid_side, voxel_grid_side, voxel_grid_side);
-  sor.filter (*cloud_to_filter);
-  ROS_DEBUG_STREAM("downsampled!");
+    if (u != -FLT_MAX || v != -FLT_MAX)
+    {
+        return true;
+    }
+    else
+    {
+        return false;
+    }
 }
 
-void filterCloudRadiusBased(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_to_filter)
+void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSampleReceivedData data)
 {
-  // Radius based filter:
-  pcl::RadiusOutlierRemoval < pcl::PointXYZRGB > ror;
-  ror.setInputCloud(cloud_to_filter);
-  ror.setRadiusSearch(search_radius);
-  ror.setMinNeighborsInRadius(min_neighbours);
-  // apply filter
-  ROS_DEBUG_STREAM("Starting filtering");
-  int before = cloud_to_filter->size();
-  double old_ = ros::Time::now().toSec();
-  ror.filter(*cloud_to_filter);
-  double new_ = ros::Time::now().toSec() - old_;
-  int after = cloud_to_filter->size();
-  ROS_DEBUG_STREAM("filtered in " << new_ << " seconds;" << "points reduced from " << before << " to " << after);
-  cloud.header.stamp = ros::Time::now();
+    // First, we generate the raw depth image
+    int32_t width = 0;
+    int32_t height = 0;
+    DepthSense::FrameFormat_toResolution(data.captureConfiguration.frameFormat, &width, &height);
+    // Copy and build the depth image
+    float* raw_depth_floats = const_cast<float*>(static_cast<const float*>(data.depthMapFloatingPoint));
+    std::vector<float> depth_floats(raw_depth_floats, raw_depth_floats + (width * height));
+    cv::Mat new_image_depth = cv::Mat(depth_floats).reshape(1, height);
+    // Copy and build the confidences
+    int16_t* raw_confidence_shorts = const_cast<int16_t*>(static_cast<const int16_t*>(data.confidenceMap));
+    std::vector<int16_t> confidence_shorts(raw_confidence_shorts, raw_confidence_shorts + (width * height));
+    cv::Mat new_image_confidences = cv::Mat(confidence_shorts).reshape(1, height);
+    // Set depth image points with confidence below threshold to NaN
+    ;
+    // Convert the OpenCV depth image to ROS
+    std_msgs::Header new_image_header;
+    new_image_header.frame_id = g_depth_optical_frame_name;
+    new_image_header.stamp = ros::Time::now();
+    sensor_msgs::Image new_depth_image;
+    cv_bridge::CvImage new_depth_image_converted(new_image_header, sensor_msgs::image_encodings::TYPE_32FC1, new_image_depth);
+    new_depth_image_converted.toImageMsg(new_depth_image);
+    sensor_msgs::CameraInfo new_depth_image_camerainfo = g_depth_camerainfo;
+    new_depth_image_camerainfo.header = new_image_header;
+    // Publish the image
+    g_depth_pub.publish(new_depth_image, new_depth_image_camerainfo);
+//    // Convert the OpenCV confidence image to ROS
+//    sensor_msgs::Image new_confidence_image;
+//    cv_bridge::CvImage new_confidence_image_converted(new_image_header, sensor_msgs::image_encodings::TYPE_16SC1, new_image_confidences);
+//    new_confidence_image_converted.toImageMsg(new_confidence_image);
+//    sensor_msgs::CameraInfo new_confidence_image_camerainfo = g_depth_camerainfo;
+//    new_confidence_image_camerainfo.header = new_image_header;
+//    // Publish the image
+//    g_confidence_pub.publish(new_confidence_image, new_confidence_image_camerainfo);
+    // Second, generate the pointcloud
+    DepthSense::FPVertex* raw_vertices = const_cast<DepthSense::FPVertex*>(static_cast<const DepthSense::FPVertex*>(data.verticesFloatingPoint));
+    std::vector<DepthSense::FPVertex> vertices(raw_vertices, raw_vertices + (width * height));
+    // Make the XYZ pointcloud
+    pcl::PointCloud<pcl::PointXYZ> pcl_pointcloud;
+    for (size_t idx = 0; idx < vertices.size(); idx++)
+    {
+        float x = vertices[idx].x;
+        float y = -vertices[idx].y;
+        float z = vertices[idx].z;
+        if (is_vertex_valid(x, y, z))
+        {
+            pcl::PointXYZ new_point(x, y, z);
+            pcl_pointcloud.push_back(new_point);
+        }
+    }
+    // Convert the XYZ pointcloud to ROS message
+    sensor_msgs::PointCloud2 ros_pointcloud;
+    pcl::toROSMsg(pcl_pointcloud, ros_pointcloud);
+    ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
+    ros_pointcloud.header.stamp = new_image_header.stamp;
+    g_pointcloud_pub.publish(ros_pointcloud);
+    // Make the XYZRGB pointcloud (if enabled)
+    if (g_color_config.enable_color_map && !g_current_color_image.empty())
+    {
+        // Get the UV map that maps the color map and vertices together
+        DepthSense::UV* raw_uv = const_cast<DepthSense::UV*>(static_cast<const DepthSense::UV*>(data.uvMap));
+        std::vector<DepthSense::UV> uv(raw_uv, raw_uv + (width * height));
+        // Make the XYZRGB pointcloud
+        pcl::PointCloud<pcl::PointXYZRGB> pcl_rgb_pointcloud;
+        for (size_t idx = 0; idx < vertices.size(); idx++)
+        {
+            float x = vertices[idx].x;
+            float y = -vertices[idx].y;
+            float z = vertices[idx].z;
+            float u = uv[idx].u;
+            float v = uv[idx].v;
+            if (is_vertex_valid(x, y, z) && is_uv_valid(u, v))
+            {
+                // Lookup RGB colors
+                size_t image_height = (size_t)(v * g_current_color_image.rows);
+                size_t image_width = (size_t)(u * g_current_color_image.cols);
+                cv::Vec3b pixel = g_current_color_image.at<cv::Vec3b>(image_height, image_width);
+                uint8_t blue = pixel[0];
+                uint8_t green = pixel[1];
+                uint8_t red = pixel[2];
+                // Make the point
+                pcl::PointXYZRGB new_point(red, green, blue);
+                new_point.data[0] = x;
+                new_point.data[1] = y;
+                new_point.data[2] = z;
+                pcl_rgb_pointcloud.push_back(new_point);
+            }
+        }
+        // Convert the XYZRGB pointcloud to ROS message
+        sensor_msgs::PointCloud2 ros_rgb_pointcloud;
+        pcl::toROSMsg(pcl_rgb_pointcloud, ros_rgb_pointcloud);
+        ros_rgb_pointcloud.header.frame_id = g_depth_optical_frame_name;
+        ros_rgb_pointcloud.header.stamp = new_image_header.stamp;
+        g_rgb_pointcloud_pub.publish(ros_rgb_pointcloud);
+    }
+    else if (g_color_config.enable_color_map && g_current_color_image.empty())
+    {
+        ROS_WARN("XYZRGB pointclouds enabled, but no color image received yet. Not publishing XYZRGB pointcloud");
+    }
 }
 
 void setupCameraInfo(const DepthSense::IntrinsicParameters& params, sensor_msgs::CameraInfo& cam_info)
@@ -299,543 +340,611 @@ void setupCameraInfo(const DepthSense::IntrinsicParameters& params, sensor_msgs:
   cam_info.P[10] = 1.0;
 }
 
-// New depth sample event varsace tieshandler
-void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data)
+void ConfigureDepthNode(DepthSense::DepthNode& depth_node)
 {
-  if (img_depth.data.size() == 0)
-  {
-    // Project some 3D points in the Color Frame
-    if (!g_pProjHelper)
-      g_pProjHelper = new ProjectionHelper(data.stereoCameraParameters);
-
-    int32_t w, h;
-    FrameFormat_toResolution(data.captureConfiguration.frameFormat, &w, &h);
-
-    img_depth.width = w;
-    img_depth.height = h;
-    img_depth.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
-    img_depth.is_bigendian = 0;
-    img_depth.step = sizeof(float) * w;
-    std::size_t data_size = img_depth.width * img_depth.height;
-    img_depth.data.resize(data_size * sizeof(float));
-
-    cv_img_depth.create(h, w, CV_32FC1); // unused by now; not sure if I can use it to improve speed
-
-    if (rgb_info.D.size() == 0)
+    ROS_INFO("Configuring new DepthNode...");
+    // Register the event handler
+    depth_node.newSampleReceivedEvent().connect(&OnNewDepthSample);
+    // Try to configure the node
+    try
     {
-      // User didn't provide a calibration file for the color camera, so
-      // fill camera info with the parameters provided by the camera itself
-      setupCameraInfo(data.stereoCameraParameters.colorIntrinsics, rgb_info);
+        g_context.requestControl(depth_node, 0);
+        depth_node.setConfiguration(g_depth_config.base_config);
+        depth_node.setDepthMap3Planes(g_depth_config.enable_xyz_depth);
+        depth_node.setDepthMapFloatingPoint3Planes(g_depth_config.enable_floatingpoint_xyz_depth);
+        depth_node.setEnableAccelerometer(g_depth_config.enable_accelerometer);
+        depth_node.setEnableConfidenceMap(g_depth_config.enable_confidence_map);
+        depth_node.setEnableDepthMap(g_depth_config.enable_depth_map);
+        depth_node.setEnableDepthMapFloatingPoint(g_depth_config.enable_floatingpoint_depth_map);
+        depth_node.setEnablePhaseMap(g_depth_config.enable_phase_map);
+        depth_node.setEnableUvMap(g_depth_config.enable_uv_map);
+        depth_node.setEnableVertices(g_depth_config.enable_vertices);
+        depth_node.setEnableVerticesFloatingPoint(g_depth_config.enable_floatingpoint_vertices);
+        if (depth_node.illuminationLevelIsReadOnly())
+        {
+            ROS_WARN("Illumination level cannot be set on this camera");
+        }
+        else
+        {
+            depth_node.setIlluminationLevel(g_depth_config.illumination_level);
+        }
+        ROS_INFO("...new DepthNode configuration applied");
+    }
+    catch (DepthSense::ArgumentException& e)
+    {
+        ROS_ERROR("Argument exception [%s] caught when attempting to configure depth node", e.what());
+    }
+    catch (DepthSense::UnauthorizedAccessException& e)
+    {
+        ROS_ERROR("Unauthorized access exception [%s] caught when attempting to configure depth node", e.what());
+    }
+    catch (DepthSense::IOException& e)
+    {
+        ROS_ERROR("IO exception [%s] caught when attempting to configure depth node", e.what());
+    }
+    catch (DepthSense::InvalidOperationException& e)
+    {
+        ROS_ERROR("Invalid operation exception [%s] caught when attempting to configure depth node", e.what());
+    }
+    catch (DepthSense::ConfigurationException& e)
+    {
+        ROS_ERROR("Configuration exception [%s] caught when attempting to configure depth node", e.what());
+    }
+    catch (DepthSense::StreamingException& e)
+    {
+        ROS_ERROR("Streaming exception [%s] caught when attempting to configure depth node", e.what());
+    }
+    catch (DepthSense::TimeoutException& e)
+    {
+        ROS_ERROR("Timeout exception [%s] caught when attempting to configure depth node", e.what());
+    }
+    catch (DepthSense::Exception& e)
+    {
+        ROS_ERROR("Unplanned exception [%s] caught when attempting to configure depth node", e.what());
+    }
+}
+
+void ConfigureColorNode(DepthSense::ColorNode& color_node)
+{
+    ROS_INFO("Configuring new ColorNode...");
+    // Register the event handler
+    color_node.newSampleReceivedEvent().connect(&OnNewColorSample);
+    // Try to configure the node
+    try
+    {
+        g_context.requestControl(color_node, 0);
+        color_node.setConfiguration(g_color_config.base_config);
+        color_node.setBrightness(g_color_config.brightness);
+        color_node.setContrast(g_color_config.contrast);
+        color_node.setEnableColorMap(g_color_config.enable_color_map);
+        color_node.setEnableCompressedData(g_color_config.enable_compressed_data);
+        color_node.setGamma(g_color_config.gamma);
+        color_node.setHue(g_color_config.hue);
+        color_node.setSaturation(g_color_config.saturation);
+        color_node.setSharpness(g_color_config.sharpness);
+        // Set the exposure
+        if (color_node.exposureAutoIsReadOnly() || color_node.exposureAutoPriorityIsReadOnly() || color_node.exposureIsReadOnly())
+        {
+            ROS_WARN("Exposure cannot be set on this camera");
+        }
+        else
+        {
+            if (g_color_config.enable_priority_auto_exposure_mode)
+            {
+                color_node.setExposureAuto(DepthSense::EXPOSURE_AUTO_APERTURE_PRIORITY);
+                color_node.setExposureAutoPriority(true);
+            }
+            else
+            {
+                color_node.setExposureAuto(DepthSense::EXPOSURE_AUTO_MANUAL);
+                color_node.setExposureAutoPriority(false);
+                color_node.setExposure(g_color_config.exposure);
+            }
+        }
+        // Set the white balance
+        if (g_color_config.enable_auto_white_balance)
+        {
+            color_node.setWhiteBalanceAuto(true);
+        }
+        else
+        {
+            color_node.setWhiteBalanceAuto(false);
+            color_node.setWhiteBalance(g_color_config.white_balance);
+        }
+        ROS_INFO("...new ColorNode configuration applied");
+    }
+    catch (DepthSense::ArgumentException& e)
+    {
+        ROS_ERROR("Argument exception [%s] caught when attempting to configure color node", e.what());
+    }
+    catch (DepthSense::UnauthorizedAccessException& e)
+    {
+        ROS_ERROR("Unauthorized access exception [%s] caught when attempting to configure color node", e.what());
+    }
+    catch (DepthSense::IOException& e)
+    {
+        ROS_ERROR("IO exception [%s] caught when attempting to configure color node", e.what());
+    }
+    catch (DepthSense::InvalidOperationException& e)
+    {
+        ROS_ERROR("Invalid operation exception [%s] caught when attempting to configure color node", e.what());
+    }
+    catch (DepthSense::ConfigurationException& e)
+    {
+        ROS_ERROR("Configuration exception [%s] caught when attempting to configure color node", e.what());
+    }
+    catch (DepthSense::StreamingException& e)
+    {
+        ROS_ERROR("Streaming exception [%s] caught when attempting to configure color node", e.what());
+    }
+    catch (DepthSense::TimeoutException& e)
+    {
+        ROS_ERROR("Timeout exception [%s] caught when attempting to configure color node", e.what());
+    }
+    catch (DepthSense::Exception& e)
+    {
+        ROS_ERROR("Unplanned exception [%s] caught when attempting to configure color node", e.what());
+    }
+}
+
+void ConfigureNode(DepthSense::Node node)
+{
+    if ((node.is<DepthSense::DepthNode>()) && (!g_depth_node.isSet()))
+    {
+        g_depth_node = node.as<DepthSense::DepthNode>();
+        ConfigureDepthNode(g_depth_node);
+        g_context.registerNode(node);
+    }
+    if ((node.is<DepthSense::ColorNode>()) && (!g_color_node.isSet()))
+    {
+        g_color_node = node.as<DepthSense::ColorNode>();
+        ConfigureColorNode(g_color_node);
+        g_context.registerNode(node);
+    }
+}
+
+void OnNodeConnected(DepthSense::Device device, DepthSense::Device::NodeAddedData data)
+{
+    ConfigureNode(data.node);
+    ROS_INFO("Node connected");
+}
+
+void OnNodeRemoved(DepthSense::Device device, DepthSense::Device::NodeRemovedData data)
+{
+    if (data.node.is<DepthSense::ColorNode>() && (data.node.as<DepthSense::ColorNode>() == g_color_node))
+    {
+        g_color_node.unset();
+    }
+    if (data.node.is<DepthSense::DepthNode>() && (data.node.as<DepthSense::DepthNode>() == g_depth_node))
+    {
+        g_depth_node.unset();
+    }
+    ROS_WARN("Node removed");
+}
+
+void OnDeviceConnected(DepthSense::Context context, DepthSense::Context::DeviceAddedData data)
+{
+    ROS_INFO("Device connected");
+}
+
+void OnDeviceRemoved(DepthSense::Context context, DepthSense::Context::DeviceRemovedData data)
+{
+    ROS_ERROR("Device removed");
+}
+
+void shutdown(int signum)
+{
+    if (signum == SIGINT)
+    {
+        ROS_WARN("Attempting to shutdown SoftKinetic camera driver node...");
+        if (g_context.isSet())
+        {
+            ROS_WARN("...shutting down SDK context");
+            g_context.quit();
+            g_context.stopNodes();
+            if (g_color_node.isSet())
+            {
+                g_context.unregisterNode(g_color_node);
+            }
+            if (g_depth_node.isSet())
+            {
+                g_context.unregisterNode(g_depth_node);
+            }
+            g_context.unset();
+        }
+        ROS_WARN("...shutting down ROS");
+        ros::shutdown();
+        printf("...exiting!\n");
+        fflush(stdout);
+    }
+}
+
+int main(int argc, char** argv)
+{
+    // Initialize ROS - we have our own SIGINT handler, so we tell ROS not to provide one
+    ros::init(argc, argv, "softkinetic_driver_node", ros::init_options::NoSigintHandler);
+    // Register our own SIGINT handler
+    signal(SIGINT, shutdown);
+    // Public nodehandle
+    ros::NodeHandle nh;
+    // Private nodehandle (for parameter calls)
+    ros::NodeHandle nhp("~");
+    // Image transport handler (for image compression/decompression)
+    image_transport::ImageTransport it(nh);
+    ////////////////////////////////////////////////////////////////////////////////
+    // Load parameters from the param server
+    // TF frame prefix for the whole camera
+    std::string camera_name;
+    nhp.param(std::string("camera_name"), camera_name, std::string("softkinetic_camera"));
+    // TF frame for the whole camera
+    std::string camera_frame = camera_name + "_frame";
+    // TF frame(s) for the RGB camera
+    g_rgb_frame_name = camera_name + "_rgb_frame";
+    g_rgb_optical_frame_name = camera_name + "_rgb_optical_frame";
+    // TF frame(s) for the depth camera
+    g_depth_frame_name = camera_name + "_depth_frame";
+    g_depth_optical_frame_name = camera_name + "_depth_optical_frame";
+    ////////////////////////////////////////////////////////////////////////////////
+    /////       Get the configuration parameters for pointcloud filtering      /////
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get the voxel grid filter size used for downsampling the pointcloud (0.0 means no voxel filtering)
+    double voxel_filter_size = 0.0;
+    nhp.param(std::string("voxel_filter_size"), voxel_filter_size, 0.0);
+    if (voxel_filter_size < 0.0)
+    {
+        ROS_FATAL("Voxel filter size cannot be less than 0.0");
+        shutdown(SIGINT);
+    }
+    // Get the radius filter size used for filtering noise in the pointcloud (0.0 means no radius filtering)
+    double radius_filter_size = 0.0;
+    nhp.param(std::string("radius_filter_size"), radius_filter_size, 0.0);
+    if (radius_filter_size < 0.0)
+    {
+        ROS_FATAL("Radius filter size cannot be less than 0.0");
+        shutdown(SIGINT);
+    }
+    // Get the number of minimum neighbors for the radius filter (any point with fewer than minimum number of neighbors is filtered out)
+    int radius_filter_minimum_neighbors = 0;
+    nhp.param(std::string("radius_filter_minimum_neighbors"), radius_filter_minimum_neighbors, 0);
+    if (radius_filter_minimum_neighbors < 0)
+    {
+        ROS_FATAL("Radius filter minimum neighbors cannot be less than 0");
+        shutdown(SIGINT);
+    }
+    // Sanity check the radius filter configuration
+    if (radius_filter_size > 0.0 && radius_filter_minimum_neighbors == 0)
+    {
+        ROS_FATAL("Radius filter enabled with radius %f but with zero minimum neighbors", radius_filter_size);
+        shutdown(SIGINT);
+    }
+    ////////////////////////////////////////////////////////////////////////////////
+    /////       Get the configuration parameters for the color camera          /////
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get the resolution of the RGB camera
+    std::string rgb_resolution_string;
+    nhp.param(std::string("rgb_resolution"), rgb_resolution_string, std::string("VGA"));
+    // Sanity check the RGB resolution
+    DepthSense::FrameFormat rgb_resolution = DepthSense::FRAME_FORMAT_VGA;
+    if (rgb_resolution_string == "QQVGA" || rgb_resolution_string == "qqvga")
+    {
+        rgb_resolution = DepthSense::FRAME_FORMAT_QQVGA;
+    }
+    else if (rgb_resolution_string == "QVGA" || rgb_resolution_string == "qvga")
+    {
+        rgb_resolution = DepthSense::FRAME_FORMAT_QVGA;
+    }
+    else if (rgb_resolution_string == "VGA" || rgb_resolution_string == "vga")
+    {
+        rgb_resolution = DepthSense::FRAME_FORMAT_VGA;
+    }
+    else if (rgb_resolution_string == "NHD" || rgb_resolution_string == "nhd")
+    {
+        rgb_resolution = DepthSense::FRAME_FORMAT_NHD;
+    }
+    else if (rgb_resolution_string == "WXGA_H" || rgb_resolution_string == "wxga_h")
+    {
+        rgb_resolution = DepthSense::FRAME_FORMAT_WXGA_H;
+    }
+    else
+    {
+        ROS_FATAL("Invalid RGB resolution %s", rgb_resolution_string.c_str());
+        shutdown(SIGINT);
+    }
+    // Get the target RGB framerate (0 means RGB camera is disabled)
+    int32_t rgb_framerate = 30;
+    nhp.param(std::string("rgb_framerate"), rgb_framerate, 30);
+    if (rgb_framerate < 0)
+    {
+        ROS_FATAL("RGB framerate cannot be less than 0");
+        shutdown(SIGINT);
+    }
+    if (rgb_framerate == 0)
+    {
+        ROS_WARN("RGB camera will be disabled");
+    }
+    // Get the compression mode of the RGB camera
+    std::string rgb_compression_string;
+    nhp.param(std::string("rgb_compression_type"), rgb_compression_string, std::string("MJPEG"));
+    // Sanity check the RGB compression mode
+    DepthSense::CompressionType rgb_compression_type = DepthSense::COMPRESSION_TYPE_MJPEG;
+    if (rgb_compression_string == "MJPEG" || rgb_compression_string == "mjpeg")
+    {
+        rgb_compression_type = DepthSense::COMPRESSION_TYPE_MJPEG;
+    }
+    else if (rgb_compression_string == "YUY2" || rgb_compression_string == "yuy2")
+    {
+        rgb_compression_type = DepthSense::COMPRESSION_TYPE_YUY2;
+    }
+    else
+    {
+        ROS_FATAL("Invalid RGB compression mode %s", rgb_compression_string.c_str());
+        shutdown(SIGINT);
+    }
+    // Get the powerline frequency (0 is disabled)
+    int32_t powerline_hertz = 60;
+    nhp.param(std::string("powerline_frequency"), powerline_hertz, 60);
+    // Sanity check the powerline frequency
+    DepthSense::PowerLineFrequency powerline_frequency = DepthSense::POWER_LINE_FREQUENCY_60HZ;
+    if (powerline_hertz == 60)
+    {
+        powerline_frequency = DepthSense::POWER_LINE_FREQUENCY_60HZ;
+    }
+    else if (powerline_hertz == 50)
+    {
+        powerline_frequency = DepthSense::POWER_LINE_FREQUENCY_50HZ;
+    }
+    else if (powerline_hertz == 0)
+    {
+        powerline_frequency = DepthSense::POWER_LINE_FREQUENCY_DISABLED;
+        ROS_WARN("Powerline frequency disabled");
+    }
+    else
+    {
+        ROS_FATAL("Invalid powerline frequency %d Hz", powerline_hertz);
+        shutdown(SIGINT);
     }
 
-    if (depth_info.D.size() == 0)
+    // Get the brightness of the RGB camera
+    int32_t rgb_brightness = 0;
+    nhp.param(std::string("rgb_brightness"), rgb_brightness, 0);
+    // Get the contrast of the RGB camera
+    int32_t rgb_contrast = 5;
+    nhp.param(std::string("rgb_contrast"), rgb_contrast, 5);
+    // Get the saturation of the RGB camera
+    int32_t rgb_saturation = 5;
+    nhp.param(std::string("rgb_saturation"), rgb_saturation, 5);
+    // Get the hue of the RGB camera
+    int32_t rgb_hue = 0;
+    nhp.param(std::string("rgb_hue"), rgb_hue, 0);
+    // Get the gamma of the RGB camera
+    int32_t rgb_gamma = 3;
+    nhp.param(std::string("rgb_gamma"), rgb_gamma, 3);
+    // Get the sharpness of the RGB camera
+    int32_t rgb_sharpness = 5;
+    nhp.param(std::string("rgb_sharpness"), rgb_sharpness, 5);
+    // Get the exposure of the RGB camera (0 means autoexposure)
+    int32_t rgb_exposure = 0;
+    nhp.param(std::string("rgb_exposure"), rgb_exposure, 0);
+    // Get the white balance of the RGB camera (0 means automatic white balance)
+    int32_t rgb_white_balance = 4650;
+    nhp.param(std::string("rgb_white_balance"), rgb_white_balance, 4650);
+
+    // Get the enable/disable for compressed data from the camera
+    bool enable_rgb_compression = false;
+    nhp.param(std::string("enable_rgb_compression"), enable_rgb_compression, false);
+
+    ////////////////////////////////////////////////////////////////////////////////
+    /////       Set the configuration parameters for the color camera          /////
+    ////////////////////////////////////////////////////////////////////////////////
+    // Set the basic parameters
+    g_color_config.base_config.compression = rgb_compression_type;
+    g_color_config.base_config.frameFormat = rgb_resolution;
+    g_color_config.base_config.framerate = rgb_framerate;
+    g_color_config.base_config.powerLineFrequency = powerline_frequency;
+    // Set the rgb camera enabled/disabled
+    if (rgb_framerate > 0)
     {
-      // User didn't provide a calibration file for the depth camera, so
-      // fill camera info with the parameters provided by the camera itself
-      setupCameraInfo(data.stereoCameraParameters.depthIntrinsics, depth_info);
+        g_color_config.enable_color_map = true;
     }
-  }
-
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr current_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
-  current_cloud->header.frame_id = cloud.header.frame_id;
-  current_cloud->height = img_depth.height;
-  current_cloud->width  = img_depth.width;
-  current_cloud->is_dense = false;
-  current_cloud->points.resize(img_depth.width * img_depth.height);
-
-  g_dFrames++;
-
-  Vertex p3DPoints[1];
-  Point2D p2DPoints[1];
-
-  // Dump depth map on image message, though we must do some post-processing for saturated pixels
-  std::memcpy(img_depth.data.data(), data.depthMapFloatingPoint, img_depth.data.size());
-
-  int count = -1;
-  for (int i = 0; i < img_depth.height; i++)
-  {
-    for (int j = 0; j < img_depth.width; j++)
+    else
     {
-      count++;
-      current_cloud->points[count].x = -data.verticesFloatingPoint[count].x;
-      current_cloud->points[count].y =  data.verticesFloatingPoint[count].y;
-      if (data.verticesFloatingPoint[count].z == 32001)
-      {
-        current_cloud->points[count].z = 0;
-      }
-      else
-      {
-        current_cloud->points[count].z = data.verticesFloatingPoint[count].z;
-      }
-
-      // Saturated pixels on depthMapFloatingPoint have -1 value, but on openni are NaN
-      if (data.depthMapFloatingPoint[count] < 0.0)
-      {
-        *reinterpret_cast<float*>(&img_depth.data[count*sizeof(float)]) =
-            std::numeric_limits<float>::quiet_NaN();
-      }
-
-      // Get mapping between depth map and color map, assuming we have a RGB image
-      if (img_rgb.data.size() == 0)
-      {
-        ROS_WARN_THROTTLE(2.0, "Color image is empty; pointcloud will be colorless");
-        continue;
-      }
-      p3DPoints[0] = data.vertices[count];
-      g_pProjHelper->get2DCoordinates(p3DPoints, p2DPoints, 2, CAMERA_PLANE_COLOR);
-      int x_pos = (int)p2DPoints[0].x;
-      int y_pos = (int)p2DPoints[0].y;
-
-      if (y_pos >= 0 && y_pos <= img_rgb.height && x_pos >= 0 && x_pos <= img_rgb.width)
-      {
-        // Within bounds: depth fov is significantly wider than color's
-        // one, so there are black points in the borders of the pointcloud
-        current_cloud->points[count].b = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[0];
-        current_cloud->points[count].g = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[1];
-        current_cloud->points[count].r = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[2];
-      }
+        g_color_config.enable_color_map = false;
     }
-  }
-
-  // Check for usage of voxel grid filtering to downsample point cloud
-  if (use_voxel_grid_filter)
-  {
-    downsampleCloud(current_cloud);
-  }
-
-  // Check for usage of radius filtering
-  if (use_radius_filter)
-  {
-    // use_voxel_grid_filter should be enabled so that the radius filter doesn't take too long
-    filterCloudRadiusBased(current_cloud);
-  }
-
-  // Convert current_cloud to PointCloud2 and publish
-  pcl::toROSMsg(*current_cloud, cloud);
-
-  img_depth.header.stamp = ros::Time::now();
-  depth_info.header      = img_depth.header;
-
-  pub_cloud.publish(cloud);
-  pub_depth.publish(img_depth);
-  pub_depth_info.publish(depth_info);
-}
-
-/*----------------------------------------------------------------------------*/
-void configureAudioNode()
-{
-  g_anode.newSampleReceivedEvent().connect(&onNewAudioSample);
-
-  AudioNode::Configuration config = g_anode.getConfiguration();
-  config.sampleRate = 44100;
-
-  try
-  {
-    g_context.requestControl(g_anode, 0);
-
-    g_anode.setConfiguration(config);
-    g_anode.setInputMixerLevel(0.5f);
-  }
-  catch (ArgumentException& e)
-  {
-    printf("Argument Exception: %s\n", e.what());
-  }
-  catch (UnauthorizedAccessException& e)
-  {
-    printf("Unauthorized Access Exception: %s\n", e.what());
-  }
-  catch (ConfigurationException& e)
-  {
-    printf("Configuration Exception: %s\n", e.what());
-  }
-  catch (StreamingException& e)
-  {
-    printf("Streaming Exception: %s\n", e.what());
-  }
-  catch (TimeoutException&)
-  {
-    printf("TimeoutException\n");
-  }
-}
-
-/*----------------------------------------------------------------------------*/
-void configureDepthNode()
-{
-  g_dnode.newSampleReceivedEvent().connect(&onNewDepthSample);
-
-  DepthNode::Configuration config = g_dnode.getConfiguration();
-
-  config.frameFormat = depth_frame_format;
-  config.framerate = depth_frame_rate;
-  config.mode = depth_mode;
-  config.saturation = true;
-
-  g_context.requestControl(g_dnode, 0);
-
-  g_dnode.setEnableVertices(true);
-  g_dnode.setEnableConfidenceMap(true);
-  g_dnode.setConfidenceThreshold(confidence_threshold);
-  g_dnode.setEnableVerticesFloatingPoint(true);
-  g_dnode.setEnableDepthMapFloatingPoint(true);
-
-  try
-  {
-    g_context.requestControl(g_dnode, 0);
-
-    g_dnode.setConfiguration(config);
-  }
-  catch (ArgumentException& e)
-  {
-    printf("Argument Exception: %s\n", e.what());
-  }
-  catch (UnauthorizedAccessException& e)
-  {
-    printf("Unauthorized Access Exception: %s\n", e.what());
-  }
-  catch (IOException& e)
-  {
-    printf("IO Exception: %s\n", e.what());
-  }
-  catch (InvalidOperationException& e)
-  {
-    printf("Invalid Operation Exception: %s\n", e.what());
-  }
-  catch (ConfigurationException& e)
-  {
-    printf("Configuration Exception: %s\n", e.what());
-  }
-  catch (StreamingException& e)
-  {
-    printf("Streaming Exception: %s\n", e.what());
-  }
-  catch (TimeoutException&)
-  {
-    printf("TimeoutException\n");
-  }
-}
-
-/*----------------------------------------------------------------------------*/
-void configureColorNode()
-{
-  // Connect new color sample handler
-  g_cnode.newSampleReceivedEvent().connect(&onNewColorSample);
-
-  ColorNode::Configuration config = g_cnode.getConfiguration();
-
-  config.frameFormat = color_frame_format;
-  config.compression = color_compression;
-  config.powerLineFrequency = POWER_LINE_FREQUENCY_50HZ;
-  config.framerate = color_frame_rate;
-
-  g_cnode.setEnableColorMap(true);
-
-  try
-  {
-    g_context.requestControl(g_cnode, 0);
-
-    g_cnode.setConfiguration(config);
-  }
-  catch (ArgumentException& e)
-  {
-    printf("Argument Exception: %s\n", e.what());
-  }
-  catch (UnauthorizedAccessException& e)
-  {
-    printf("Unauthorized Access Exception: %s\n", e.what());
-  }
-  catch (IOException& e)
-  {
-    printf("IO Exception: %s\n", e.what());
-  }
-  catch (InvalidOperationException& e)
-  {
-    printf("Invalid Operation Exception: %s\n", e.what());
-  }
-  catch (ConfigurationException& e)
-  {
-    printf("Configuration Exception: %s\n", e.what());
-  }
-  catch (StreamingException& e)
-  {
-    printf("Streaming Exception: %s\n", e.what());
-  }
-  catch (TimeoutException&)
-  {
-    printf("TimeoutException\n");
-  }
-}
-
-/*----------------------------------------------------------------------------*/
-void configureNode(Node node)
-{
-  if ((node.is<DepthNode>()) && (!g_dnode.isSet()) && (depth_enabled))
-  {
-    g_dnode = node.as<DepthNode>();
-    configureDepthNode();
-    g_context.registerNode(node);
-  }
-
-  if ((node.is<ColorNode>()) && (!g_cnode.isSet()) && (color_enabled))
-  {
-    g_cnode = node.as<ColorNode>();
-    configureColorNode();
-    g_context.registerNode(node);
-  }
-
-  if ((node.is<AudioNode>()) && (!g_anode.isSet()))
-  {
-    g_anode = node.as<AudioNode>();
-    configureAudioNode();
-    g_context.registerNode(node);
-  }
-}
-
-/*----------------------------------------------------------------------------*/
-void onNodeConnected(Device device, Device::NodeAddedData data)
-{
-  configureNode(data.node);
-}
-
-/*----------------------------------------------------------------------------*/
-void onNodeDisconnected(Device device, Device::NodeRemovedData data)
-{
-  if (data.node.is<AudioNode>() && (data.node.as<AudioNode>() == g_anode))
-    g_anode.unset();
-  if (data.node.is<ColorNode>() && (data.node.as<ColorNode>() == g_cnode))
-    g_cnode.unset();
-  if (data.node.is<DepthNode>() && (data.node.as<DepthNode>() == g_dnode))
-    g_dnode.unset();
-  printf("Node disconnected\n");
-}
-
-/*----------------------------------------------------------------------------*/
-void onDeviceConnected(Context context, Context::DeviceAddedData data)
-{
-  if (!g_bDeviceFound)
-  {
-    data.device.nodeAddedEvent().connect(&onNodeConnected);
-    data.device.nodeRemovedEvent().connect(&onNodeDisconnected);
-    g_bDeviceFound = true;
-  }
-}
-
-/*----------------------------------------------------------------------------*/
-void onDeviceDisconnected(Context context, Context::DeviceRemovedData data)
-{
-  g_bDeviceFound = false;
-  printf("Device disconnected\n");
-}
-
-void sigintHandler(int sig)
-{
-  g_context.quit();
-  ros::shutdown();
-}
-
-/*----------------------------------------------------------------------------*/
-int main(int argc, char* argv[])
-{
-  // Initialize ROS
-  ros::init(argc, argv, "softkinetic_bringup_node");
-  ros::NodeHandle nh("~");
-
-  // Override the default ROS SIGINT handler to call g_context.quit() and avoid escalating to SIGTERM
-  signal(SIGINT, sigintHandler);
-
-  // Get frame id from parameter server
-  std::string softkinetic_link;
-  if (!nh.hasParam("camera_link"))
-  {
-    ROS_ERROR_STREAM("For " << ros::this_node::getName() << ", parameter 'camera_link' is missing.");
-    ros_node_shutdown = true;
-  }
-
-  nh.param<std::string>("camera_link", softkinetic_link, "softkinetic_link");
-  cloud.header.frame_id = softkinetic_link;
-
-  // Fill in the color and depth images message header frame id
-  std::string optical_frame;
-  if (nh.getParam("rgb_optical_frame", optical_frame))
-  {
-    img_rgb.header.frame_id = optical_frame.c_str();
-    img_mono.header.frame_id = optical_frame.c_str();
-  }
-  else
-  {
-    img_rgb.header.frame_id = "/softkinetic_rgb_optical_frame";
-    img_mono.header.frame_id = "/softkinetic_rgb_optical_frame";
-  }
-
-  if (nh.getParam("depth_optical_frame", optical_frame))
-  {
-    img_depth.header.frame_id = optical_frame.c_str();
-  }
-  else
-  {
-    img_depth.header.frame_id = "/softkinetic_depth_optical_frame";
-  }
-
-  // Get confidence threshold from parameter server
-  if (!nh.hasParam("confidence_threshold"))
-  {
-    ROS_ERROR_STREAM("For " << ros::this_node::getName() << ", parameter 'confidence_threshold' is not set on server.");
-    ros_node_shutdown = true;
-  }
-  nh.param<int>("confidence_threshold", confidence_threshold, 150);
-
-  // Check for usage of voxel grid filtering to downsample the point cloud
-  nh.param<bool>("use_voxel_grid_filter", use_voxel_grid_filter, false);
-  if (use_voxel_grid_filter)
-  {
-    // Downsampling cloud parameters
-    nh.param<double>("voxel_grid_side", voxel_grid_side, 0.01);
-  }
-
-  // Check for usage of radius filtering
-  nh.param<bool>("use_radius_filter", use_radius_filter, false);
-  if (use_radius_filter)
-  {
-    if (!nh.hasParam("search_radius"))
+    // Set the rest of the parameters
+    g_color_config.brightness = rgb_brightness;
+    g_color_config.contrast = rgb_contrast;
+    g_color_config.saturation = rgb_saturation;
+    g_color_config.hue = rgb_hue;
+    g_color_config.gamma = rgb_gamma;
+    g_color_config.sharpness = rgb_sharpness;
+    g_color_config.enable_compressed_data = enable_rgb_compression;
+    // Set the exposure controls
+    if (rgb_exposure == 0)
     {
-      ROS_ERROR_STREAM("For " << ros::this_node::getName() << ", parameter 'search_radius' is not set on server.");
-      ros_node_shutdown = true;
+        g_color_config.enable_priority_auto_exposure_mode = true;
+        g_color_config.auto_exposure_mode = DepthSense::EXPOSURE_AUTO_APERTURE_PRIORITY;
     }
-    nh.param<double>("search_radius", search_radius, 0.5);
-
-    if (!nh.hasParam("min_neighbours"))
+    else
     {
-      ROS_ERROR_STREAM(
-          "For " << ros::this_node::getName() << ", parameter 'min_neighbours' is not set on server.");
-      ros_node_shutdown = true;
+        g_color_config.enable_priority_auto_exposure_mode = false;
+        g_color_config.auto_exposure_mode = DepthSense::EXPOSURE_AUTO_MANUAL;
+        g_color_config.exposure = rgb_exposure;
     }
-    nh.param<int>("min_neighbours", min_neighbours, 0);
-  }
-
-  std::string depth_mode_str;
-  nh.param<std::string>("depth_mode", depth_mode_str, "close");
-  if (depth_mode_str == "long")
-    depth_mode = DepthNode::CAMERA_MODE_LONG_RANGE;
-  else
-    depth_mode = DepthNode::CAMERA_MODE_CLOSE_MODE;
-
-  std::string depth_frame_format_str;
-  nh.param<std::string>("depth_frame_format", depth_frame_format_str, "QVGA");
-  if (depth_frame_format_str == "QQVGA")
-    depth_frame_format = FRAME_FORMAT_QQVGA;
-  else if (depth_frame_format_str == "QVGA")
-    depth_frame_format = FRAME_FORMAT_QVGA;
-  else
-    depth_frame_format = FRAME_FORMAT_VGA;
-
-  nh.param<bool>("enable_depth", depth_enabled, true);
-  nh.param<int>("depth_frame_rate", depth_frame_rate, 25);
-
-  std::string color_compression_str;
-  nh.param<std::string>("color_compression", color_compression_str, "MJPEG");
-  if (color_compression_str == "YUY2")
-    color_compression = COMPRESSION_TYPE_YUY2;
-  else
-    color_compression = COMPRESSION_TYPE_MJPEG;
-
-  std::cout << "Setting color compression to MJPEG" << std::endl;
-  color_compression = COMPRESSION_TYPE_MJPEG;
-
-  std::string color_frame_format_str;
-  nh.param<std::string>("color_frame_format", color_frame_format_str, "WXGA");
-  if (color_frame_format_str == "QQVGA")
-    color_frame_format = FRAME_FORMAT_QQVGA;
-  else if (color_frame_format_str == "QVGA")
-    color_frame_format = FRAME_FORMAT_QVGA;
-  else if (color_frame_format_str == "VGA")
-    color_frame_format = FRAME_FORMAT_VGA;
-  else if (color_frame_format_str == "NHD")
-    color_frame_format = FRAME_FORMAT_NHD;
-  else
-    color_frame_format = FRAME_FORMAT_WXGA_H;
-
-  nh.param<bool>("enable_color", color_enabled, true);
-  nh.param<int>("color_frame_rate", color_frame_rate, 25);
-
-  // Initialize image transport object
-  image_transport::ImageTransport it(nh);
-
-  // Initialize publishers
-  pub_cloud = nh.advertise<sensor_msgs::PointCloud2>("depth/points", 1);
-  pub_rgb = it.advertise("rgb/image_color", 1);
-  pub_mono = it.advertise("rgb/image_mono", 1);
-  pub_depth = it.advertise("depth/image_raw", 1);
-  pub_depth_info = nh.advertise<sensor_msgs::CameraInfo>("depth/camera_info", 1);
-  pub_rgb_info = nh.advertise<sensor_msgs::CameraInfo>("rgb/camera_info", 1);
-
-  std::string calibration_file;
-  if (nh.getParam("rgb_calibration_file", calibration_file))
-  {
-    camera_info_manager::CameraInfoManager camera_info_manager(nh, "senz3d", "file://" + calibration_file);
-    rgb_info = camera_info_manager.getCameraInfo();
-  }
-
-  if (nh.getParam("depth_calibration_file", calibration_file))
-  {
-    camera_info_manager::CameraInfoManager camera_info_manager(nh, "senz3d", "file://" + calibration_file);
-    depth_info = camera_info_manager.getCameraInfo();
-  }
-
-  g_context = Context::create("softkinetic");
-
-  g_context.deviceAddedEvent().connect(&onDeviceConnected);
-  g_context.deviceRemovedEvent().connect(&onDeviceDisconnected);
-
-  // Get the list of currently connected devices
-  vector<Device> da = g_context.getDevices();
-
-  // In case there are several devices, index of camera to start ought to come as an argument
-  // By default, index 0 is taken:
-  int device_index = 0;
-  ROS_INFO_STREAM("Number of Devices found: " << da.size());
-  if (da.size() == 0)
-  {
-    ROS_ERROR_STREAM("No devices found!!!!!!");
-  }
-
-  if (da.size() >= 1)
-  {
-    // If camera index comes as argument, device_index will be updated
-    if (argc > 1)
+    // Set the white balance controls
+    if (rgb_white_balance == 0)
     {
-      device_index = atoi(argv[1]);
+        g_color_config.enable_auto_white_balance = true;
     }
-
-    g_bDeviceFound = true;
-
-    da[device_index].nodeAddedEvent().connect(&onNodeConnected);
-    da[device_index].nodeRemovedEvent().connect(&onNodeDisconnected);
-
-    vector<Node> na = da[device_index].getNodes();
-
-    for (int n = 0; n < (int)na.size(); n++)
-      configureNode(na[n]);
-  }
-  // Loop while ros core is operational or Ctrl-C is used
-  if (ros_node_shutdown)
-  {
-    ros::shutdown();
-  }
-  while (ros::ok())
-  {
+    else
+    {
+        g_color_config.enable_auto_white_balance = false;
+        g_color_config.white_balance = rgb_white_balance;
+    }
+    // Get the RGB calibration filepath
+    std::string rgb_calibration_file;
+    nhp.param(std::string("rgb_calibration_file"), rgb_calibration_file, std::string(""));
+    if (rgb_calibration_file == "")
+    {
+        ROS_WARN("No calibration provided for RGB camera");
+    }
+    ////////////////////////////////////////////////////////////////////////////////
+    /////       Get the configuration parameters for the depth camera          /////
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get the resolution of the depth camera
+    std::string depth_resolution_string;
+    nhp.param(std::string("depth_resolution"), depth_resolution_string, std::string("QVGA"));
+    // Sanity check the depth resolution
+    DepthSense::FrameFormat depth_resolution = DepthSense::FRAME_FORMAT_QVGA;
+    if (depth_resolution_string == "QQVGA" || depth_resolution_string == "qqvga")
+    {
+        depth_resolution = DepthSense::FRAME_FORMAT_QQVGA;
+    }
+    else if (depth_resolution_string == "QVGA" || depth_resolution_string == "qvga")
+    {
+        depth_resolution = DepthSense::FRAME_FORMAT_QVGA;
+    }
+    else if (depth_resolution_string == "VGA" || depth_resolution_string == "vga")
+    {
+        depth_resolution = DepthSense::FRAME_FORMAT_VGA;
+    }
+    else
+    {
+        ROS_FATAL("Invalid depth resolution %s", depth_resolution_string.c_str());
+        shutdown(SIGINT);
+    }
+    // Get the target depth framerate (0 means depth camera is disabled)
+    int32_t depth_framerate = 30;
+    nhp.param(std::string("depth_framerate"), depth_framerate, 30);
+    if (depth_framerate < 0)
+    {
+        ROS_FATAL("Color framerate cannot be less than 0");
+        shutdown(SIGINT);
+    }
+    if (depth_framerate == 0)
+    {
+        ROS_WARN("Depth camera will be disabled");
+    }
+    // Get the operating mode of the depth camera
+    std::string depth_camera_mode_string;
+    nhp.param(std::string("depth_camera_mode"), depth_camera_mode_string, std::string("CLOSE"));
+    // Sanity check the color compression mode
+    DepthSense::DepthNode::CameraMode depth_camera_mode = DepthSense::DepthNode::CAMERA_MODE_LONG_RANGE;
+    if (depth_camera_mode_string == "LONG" || depth_camera_mode_string == "long")
+    {
+        depth_camera_mode = DepthSense::DepthNode::CAMERA_MODE_LONG_RANGE;
+    }
+    else if (depth_camera_mode_string == "CLOSE" || depth_camera_mode_string == "close")
+    {
+        depth_camera_mode = DepthSense::DepthNode::CAMERA_MODE_CLOSE_MODE;
+    }
+    else
+    {
+        ROS_FATAL("Invalid depth camera mode %s", depth_camera_mode_string.c_str());
+        shutdown(SIGINT);
+    }
+    // Get the saturation setting for the depth camera
+    bool depth_saturation = false;
+    nhp.param(std::string("depth_saturation"), depth_saturation, false);
+    // Get the illumination level for the depth camera
+    int32_t depth_illumination_level = 100;
+    nhp.param(std::string("depth_illumination_level"), depth_illumination_level, 100);
+    ////////////////////////////////////////////////////////////////////////////////
+    /////       Set the configuration parameters for the depth camera          /////
+    ////////////////////////////////////////////////////////////////////////////////
+    // Set the basic parameters
+    g_depth_config.base_config.frameFormat = depth_resolution;
+    g_depth_config.base_config.framerate = depth_framerate;
+    g_depth_config.base_config.mode = depth_camera_mode;
+    g_depth_config.base_config.saturation = depth_saturation;
+    // Set the depth camera enabled/disabled
+    if (depth_framerate > 0)
+    {
+        g_depth_config.enable_floatingpoint_vertices = true;
+        g_depth_config.enable_uv_map = true;
+        g_depth_config.enable_xyz_depth = false;
+        g_depth_config.enable_floatingpoint_xyz_depth = false;
+        g_depth_config.enable_accelerometer = false;
+        g_depth_config.enable_confidence_map = true;
+        g_depth_config.enable_depth_map = false;
+        g_depth_config.enable_floatingpoint_depth_map = true;
+        g_depth_config.enable_phase_map = false;
+        g_depth_config.enable_vertices = false;
+    }
+    else
+    {
+        g_depth_config.enable_floatingpoint_vertices = false;
+        g_depth_config.enable_uv_map = false;
+        g_depth_config.enable_xyz_depth = false;
+        g_depth_config.enable_floatingpoint_xyz_depth = false;
+        g_depth_config.enable_accelerometer = false;
+        g_depth_config.enable_confidence_map = false;
+        g_depth_config.enable_depth_map = false;
+        g_depth_config.enable_floatingpoint_depth_map = false;
+        g_depth_config.enable_phase_map = false;
+        g_depth_config.enable_vertices = false;
+    }
+    // Set the rest of the parameters
+    g_depth_config.illumination_level = depth_illumination_level;
+    // Get the depth calibration filepath
+    std::string depth_calibration_file;
+    nhp.param(std::string("depth_calibration_file"), depth_calibration_file, std::string(""));
+    if (depth_calibration_file == "")
+    {
+        ROS_WARN("No calibration provided for depth camera");
+    }
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get the device index (to select between multiple cameras)
+    int32_t device_index = 0;
+    nhp.param(std::string("device_index"), device_index, 0);
+    if (device_index < 0)
+    {
+        ROS_FATAL("Device index cannot be less than 0");
+        shutdown(SIGINT);
+    }
+    ////////////////////////////////////////////////////////////////////////////////
+    // Initialize publishers
+    g_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_xyz", 1);
+    g_rgb_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_frame + "/points_xyzrgb", 1);
+    g_rgb_pub = it.advertiseCamera(camera_name + "/color", 1);
+    g_depth_pub = it.advertiseCamera(camera_name + "/depth", 1);
+    g_confidence_pub = it.advertiseCamera(camera_name + "/depth_confidence", 1);
+    ////////////////////////////////////////////////////////////////////////////////
+    // Initialize the SDK
+    g_context = DepthSense::Context::create();
+    g_context.deviceAddedEvent().connect(&OnDeviceConnected);
+    g_context.deviceRemovedEvent().connect(&OnDeviceRemoved);
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get the currently available devices
+    std::vector<DepthSense::Device> devices = g_context.getDevices();
+    if (devices.size() == 0)
+    {
+        ROS_FATAL("No SoftKinetic camera connected");
+        shutdown(SIGINT);
+    }
+    if (!(device_index < devices.size()))
+    {
+        ROS_FATAL("Device index %d is invalid for %zu devices", device_index, devices.size());
+        shutdown(SIGINT);
+    }
+    ////////////////////////////////////////////////////////////////////////////////
+    // Get the desired device
+    DepthSense::Device& device = devices[device_index];
+    // Configure the device
+    device.nodeAddedEvent().connect(&OnNodeConnected);
+    device.nodeRemovedEvent().connect(&OnNodeRemoved);
+    // Get the nodes of the device
+    std::vector<DepthSense::Node> device_nodes = device.getNodes();
+    // Configure the nodes
+    for (size_t idx = 0; idx < device_nodes.size(); idx++)
+    {
+        ConfigureNode(device_nodes[idx]);
+    }
+    ////////////////////////////////////////////////////////////////////////////////
+    // Run until stopped
     g_context.startNodes();
     g_context.run();
-  }
-  // Close out all nodes
-  if (g_cnode.isSet())
-    g_context.unregisterNode(g_cnode);
-  if (g_dnode.isSet())
-    g_context.unregisterNode(g_dnode);
-  if (g_anode.isSet())
-    g_context.unregisterNode(g_anode);
-
-  if (g_pProjHelper)
-    delete g_pProjHelper;
-  g_context.stopNodes();
-
-  return 0;
+    // If stopped, call the cleanup code
+    ROS_INFO("Calling shutdown...");
+    shutdown(SIGINT);
+    return 0;
 }
