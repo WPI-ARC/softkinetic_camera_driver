@@ -16,6 +16,8 @@ include_directories(${catkin_INCLUDE_DIRS} ${DEPTHSENSESDK_INCLUDE_DIRS})
 ## Only build driver if we have the DepthSense SDK
 if(DEPTHSENSESDK_FOUND)
   message(STATUS "DepthSense SDK found. Building SoftKinetic camera driver.")
+  ## Enable optimizations
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
   ## Build executable
   add_executable(softkinetic_driver_node src/softkinetic_driver_node.cpp)
   add_dependencies(softkinetic_driver_node ${catkin_EXPORTED_TARGETS})
