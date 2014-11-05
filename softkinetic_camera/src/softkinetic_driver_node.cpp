@@ -129,9 +129,8 @@ std::string g_depth_frame_name;
 std::string g_depth_optical_frame_name;
 sensor_msgs::CameraInfo g_rgb_camerainfo;
 sensor_msgs::CameraInfo g_depth_camerainfo;
-double g_voxel_filter_size = 0.0;
-double g_radius_filter_size = 0.0;
-int g_radius_filter_minimum_neighbors = 0;
+// Config for the confidence filter
+int32_t g_confidence_threshold = 0;
 // Save the current color map for coloring pointclouds
 cv::Mat g_current_color_image;
 
@@ -221,12 +220,17 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
     cv::Mat new_image_confidences = cv::Mat(confidence_shorts).reshape(1, height);
     // Set depth image points with confidence below threshold to NaN
     ;
+    // Filter the depth image
+    cv::Mat new_image_depth_filtered(new_image_depth.rows, new_image_depth.cols, CV_32FC1);
+    cv::Mat depth_mean_kernel(3, 3, CV_32FC1);
+    depth_mean_kernel.setTo(1.0);
+    cv::filter2D(new_image_depth, new_image_depth_filtered, CV_32FC1, depth_mean_kernel);
     // Convert the OpenCV depth image to ROS
     std_msgs::Header new_image_header;
     new_image_header.frame_id = g_depth_optical_frame_name;
     new_image_header.stamp = ros::Time::now();
     sensor_msgs::Image new_depth_image;
-    cv_bridge::CvImage new_depth_image_converted(new_image_header, sensor_msgs::image_encodings::TYPE_32FC1, new_image_depth);
+    cv_bridge::CvImage new_depth_image_converted(new_image_header, sensor_msgs::image_encodings::TYPE_32FC1, new_image_depth_filtered);
     new_depth_image_converted.toImageMsg(new_depth_image);
     sensor_msgs::CameraInfo new_depth_image_camerainfo = g_depth_camerainfo;
     new_depth_image_camerainfo.header = new_image_header;
@@ -252,81 +256,22 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         float z = vertices[idx].z;
         if (is_vertex_valid(x, y, z))
         {
-            pcl::PointXYZ new_point(x, y, z);
-            pcl_pointcloud.push_back(new_point);
+            // Filter based on confidence
+            int32_t confidence = (int32_t)confidence_shorts[idx];
+            if (confidence >= g_confidence_threshold)
+            {
+                pcl::PointXYZ new_point(x, y, z);
+                pcl_pointcloud.push_back(new_point);
+            }
         }
     }
-    // Filter and publish the XYZ pointcloud
-    if (g_voxel_filter_size > 0.0 && g_radius_filter_size > 0.0)
-    {
-        // Radius filter the pointcloud
-        pcl::PointCloud<pcl::PointXYZ> radius_filtered_pcl_pointcloud;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_pointcloud_ptr(&pcl_pointcloud, dealocate_pcl_pointcloud_fn);
-        pcl::RadiusOutlierRemoval<pcl::PointXYZ> radius_filter;
-        radius_filter.setInputCloud(pcl_pointcloud_ptr);
-        radius_filter.setRadiusSearch(g_radius_filter_size);
-        radius_filter.setMinNeighborsInRadius(g_radius_filter_minimum_neighbors);
-        radius_filter.filter(radius_filtered_pcl_pointcloud);
-        // Voxel filter the pointcloud
-        pcl::PointCloud<pcl::PointXYZ> voxel_filtered_pcl_pointcloud;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr radius_filtered_pcl_pointcloud_ptr(&radius_filtered_pcl_pointcloud, dealocate_pcl_pointcloud_fn);
-        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-        voxel_filter.setInputCloud(radius_filtered_pcl_pointcloud_ptr);
-        voxel_filter.setLeafSize(g_voxel_filter_size, g_voxel_filter_size, g_voxel_filter_size);
-        voxel_filter.filter(voxel_filtered_pcl_pointcloud);
-        // Publish the filtered cloud
-        // Convert the XYZ pointcloud to ROS message
-        sensor_msgs::PointCloud2 ros_pointcloud;
-        pcl::toROSMsg(voxel_filtered_pcl_pointcloud, ros_pointcloud);
-        ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
-        ros_pointcloud.header.stamp = new_image_header.stamp;
-        g_pointcloud_pub.publish(ros_pointcloud);
-    }
-    else if (g_voxel_filter_size > 0.0)
-    {
-        // Voxel filter the pointcloud
-        pcl::PointCloud<pcl::PointXYZ> voxel_filtered_pcl_pointcloud;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_pointcloud_ptr(&pcl_pointcloud, dealocate_pcl_pointcloud_fn);
-        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-        voxel_filter.setInputCloud(pcl_pointcloud_ptr);
-        voxel_filter.setLeafSize(g_voxel_filter_size, g_voxel_filter_size, g_voxel_filter_size);
-        voxel_filter.filter(voxel_filtered_pcl_pointcloud);
-        // Publish the filtered cloud
-        // Convert the XYZ pointcloud to ROS message
-        sensor_msgs::PointCloud2 ros_pointcloud;
-        pcl::toROSMsg(voxel_filtered_pcl_pointcloud, ros_pointcloud);
-        ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
-        ros_pointcloud.header.stamp = new_image_header.stamp;
-        g_pointcloud_pub.publish(ros_pointcloud);
-    }
-    else if (g_radius_filter_size > 0.0)
-    {
-        // Radius filter the pointcloud
-        pcl::PointCloud<pcl::PointXYZ> radius_filtered_pcl_pointcloud;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_pointcloud_ptr(&pcl_pointcloud, dealocate_pcl_pointcloud_fn);
-        pcl::RadiusOutlierRemoval<pcl::PointXYZ> radius_filter;
-        radius_filter.setInputCloud(pcl_pointcloud_ptr);
-        radius_filter.setRadiusSearch(g_radius_filter_size);
-        radius_filter.setMinNeighborsInRadius(g_radius_filter_minimum_neighbors);
-        radius_filter.filter(radius_filtered_pcl_pointcloud);
-        // Publish the filtered cloud
-        // Convert the XYZ pointcloud to ROS message
-        sensor_msgs::PointCloud2 ros_pointcloud;
-        pcl::toROSMsg(radius_filtered_pcl_pointcloud, ros_pointcloud);
-        ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
-        ros_pointcloud.header.stamp = new_image_header.stamp;
-        g_pointcloud_pub.publish(ros_pointcloud);
-    }
-    else
-    {
-        // Publish the cloud without filtering
-        // Convert the XYZ pointcloud to ROS message
-        sensor_msgs::PointCloud2 ros_pointcloud;
-        pcl::toROSMsg(pcl_pointcloud, ros_pointcloud);
-        ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
-        ros_pointcloud.header.stamp = new_image_header.stamp;
-        g_pointcloud_pub.publish(ros_pointcloud);
-    }
+    // Publish the cloud without filtering
+    // Convert the XYZ pointcloud to ROS message
+    sensor_msgs::PointCloud2 ros_pointcloud;
+    pcl::toROSMsg(pcl_pointcloud, ros_pointcloud);
+    ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
+    ros_pointcloud.header.stamp = new_image_header.stamp;
+    g_pointcloud_pub.publish(ros_pointcloud);
     // Make the XYZRGB pointcloud (if enabled)
     if (g_color_config.enable_color_map && !g_current_color_image.empty())
     {
@@ -351,85 +296,26 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
                 uint8_t blue = pixel[0];
                 uint8_t green = pixel[1];
                 uint8_t red = pixel[2];
-                // Make the point
-                pcl::PointXYZRGB new_point(red, green, blue);
-                new_point.data[0] = x;
-                new_point.data[1] = y;
-                new_point.data[2] = z;
-                pcl_rgb_pointcloud.push_back(new_point);
+                // Filter based on confidence
+                int32_t confidence = (int32_t)confidence_shorts[idx];
+                if (confidence >= g_confidence_threshold)
+                {
+                    // Make the point
+                    pcl::PointXYZRGB new_point(red, green, blue);
+                    new_point.data[0] = x;
+                    new_point.data[1] = y;
+                    new_point.data[2] = z;
+                    pcl_rgb_pointcloud.push_back(new_point);
+                }
             }
         }
-        // Filter and publish the XYZ pointcloud
-        if (g_voxel_filter_size > 0.0 && g_radius_filter_size > 0.0)
-        {
-            // Radius filter the pointcloud
-            pcl::PointCloud<pcl::PointXYZRGB> radius_filtered_pcl_rgb_pointcloud;
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcl_rgb_pointcloud_ptr(&pcl_rgb_pointcloud, dealocate_pcl_rgb_pointcloud_fn);
-            pcl::RadiusOutlierRemoval<pcl::PointXYZRGB> radius_filter;
-            radius_filter.setInputCloud(pcl_rgb_pointcloud_ptr);
-            radius_filter.setRadiusSearch(g_radius_filter_size);
-            radius_filter.setMinNeighborsInRadius(g_radius_filter_minimum_neighbors);
-            radius_filter.filter(radius_filtered_pcl_rgb_pointcloud);
-            // Voxel filter the pointcloud
-            pcl::PointCloud<pcl::PointXYZRGB> voxel_filtered_pcl_rgb_pointcloud;
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr radius_filtered_pcl_rgb_pointcloud_ptr(&radius_filtered_pcl_rgb_pointcloud, dealocate_pcl_rgb_pointcloud_fn);
-            pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
-            voxel_filter.setInputCloud(radius_filtered_pcl_rgb_pointcloud_ptr);
-            voxel_filter.setLeafSize(g_voxel_filter_size, g_voxel_filter_size, g_voxel_filter_size);
-            voxel_filter.filter(voxel_filtered_pcl_rgb_pointcloud);
-            // Publish the filtered cloud
-            // Convert the XYZ pointcloud to ROS message
-            sensor_msgs::PointCloud2 ros_pointcloud;
-            pcl::toROSMsg(voxel_filtered_pcl_rgb_pointcloud, ros_pointcloud);
-            ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
-            ros_pointcloud.header.stamp = new_image_header.stamp;
-            g_rgb_pointcloud_pub.publish(ros_pointcloud);
-        }
-        else if (g_voxel_filter_size > 0.0)
-        {
-            // Voxel filter the pointcloud
-            pcl::PointCloud<pcl::PointXYZRGB> voxel_filtered_pcl_rgb_pointcloud;
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcl_rgb_pointcloud_ptr(&pcl_rgb_pointcloud, dealocate_pcl_rgb_pointcloud_fn);
-            pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
-            voxel_filter.setInputCloud(pcl_rgb_pointcloud_ptr);
-            voxel_filter.setLeafSize(g_voxel_filter_size, g_voxel_filter_size, g_voxel_filter_size);
-            voxel_filter.filter(voxel_filtered_pcl_rgb_pointcloud);
-            // Publish the filtered cloud
-            // Convert the XYZ pointcloud to ROS message
-            sensor_msgs::PointCloud2 ros_pointcloud;
-            pcl::toROSMsg(voxel_filtered_pcl_rgb_pointcloud, ros_pointcloud);
-            ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
-            ros_pointcloud.header.stamp = new_image_header.stamp;
-            g_rgb_pointcloud_pub.publish(ros_pointcloud);
-        }
-        else if (g_radius_filter_size > 0.0)
-        {
-            // Radius filter the pointcloud
-            pcl::PointCloud<pcl::PointXYZRGB> radius_filtered_pcl_rgb_pointcloud;
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcl_rgb_pointcloud_ptr(&pcl_rgb_pointcloud, dealocate_pcl_rgb_pointcloud_fn);
-            pcl::RadiusOutlierRemoval<pcl::PointXYZRGB> radius_filter;
-            radius_filter.setInputCloud(pcl_rgb_pointcloud_ptr);
-            radius_filter.setRadiusSearch(g_radius_filter_size);
-            radius_filter.setMinNeighborsInRadius(g_radius_filter_minimum_neighbors);
-            radius_filter.filter(radius_filtered_pcl_rgb_pointcloud);
-            // Publish the filtered cloud
-            // Convert the XYZ pointcloud to ROS message
-            sensor_msgs::PointCloud2 ros_pointcloud;
-            pcl::toROSMsg(radius_filtered_pcl_rgb_pointcloud, ros_pointcloud);
-            ros_pointcloud.header.frame_id = g_depth_optical_frame_name;
-            ros_pointcloud.header.stamp = new_image_header.stamp;
-            g_rgb_pointcloud_pub.publish(ros_pointcloud);
-        }
-        else
-        {
-            // Publish the cloud without filtering
-            // Convert the XYZRGB pointcloud to ROS message
-            sensor_msgs::PointCloud2 ros_rgb_pointcloud;
-            pcl::toROSMsg(pcl_rgb_pointcloud, ros_rgb_pointcloud);
-            ros_rgb_pointcloud.header.frame_id = g_depth_optical_frame_name;
-            ros_rgb_pointcloud.header.stamp = new_image_header.stamp;
-            g_rgb_pointcloud_pub.publish(ros_rgb_pointcloud);
-        }
+        // Publish the cloud without filtering
+        // Convert the XYZRGB pointcloud to ROS message
+        sensor_msgs::PointCloud2 ros_rgb_pointcloud;
+        pcl::toROSMsg(pcl_rgb_pointcloud, ros_rgb_pointcloud);
+        ros_rgb_pointcloud.header.frame_id = g_depth_optical_frame_name;
+        ros_rgb_pointcloud.header.stamp = new_image_header.stamp;
+        g_rgb_pointcloud_pub.publish(ros_rgb_pointcloud);
     }
     else if (g_color_config.enable_color_map && g_current_color_image.empty())
     {
@@ -726,38 +612,9 @@ int main(int argc, char** argv)
     g_depth_frame_name = camera_name + "_depth_frame";
     g_depth_optical_frame_name = camera_name + "_depth_optical_frame";
     ////////////////////////////////////////////////////////////////////////////////
-    /////       Get the configuration parameters for pointcloud filtering      /////
+    /////       Get the configuration parameters for confidence filtering      /////
     ////////////////////////////////////////////////////////////////////////////////
-    // Get the voxel grid filter size used for downsampling the pointcloud (0.0 means no voxel filtering)
-    g_voxel_filter_size = 0.0;
-    nhp.param(std::string("voxel_filter_size"), g_voxel_filter_size, 0.0);
-    if (g_voxel_filter_size < 0.0)
-    {
-        ROS_FATAL("Voxel filter size cannot be less than 0.0");
-        shutdown(SIGINT);
-    }
-    // Get the radius filter size used for filtering noise in the pointcloud (0.0 means no radius filtering)
-    g_radius_filter_size = 0.0;
-    nhp.param(std::string("radius_filter_size"), g_radius_filter_size, 0.0);
-    if (g_radius_filter_size < 0.0)
-    {
-        ROS_FATAL("Radius filter size cannot be less than 0.0");
-        shutdown(SIGINT);
-    }
-    // Get the number of minimum neighbors for the radius filter (any point with fewer than minimum number of neighbors is filtered out)
-    g_radius_filter_minimum_neighbors = 0;
-    nhp.param(std::string("radius_filter_minimum_neighbors"), g_radius_filter_minimum_neighbors, 0);
-    if (g_radius_filter_minimum_neighbors < 0)
-    {
-        ROS_FATAL("Radius filter minimum neighbors cannot be less than 0");
-        shutdown(SIGINT);
-    }
-    // Sanity check the radius filter configuration
-    if (g_radius_filter_size > 0.0 && g_radius_filter_minimum_neighbors == 0)
-    {
-        ROS_FATAL("Radius filter enabled with radius %f but with zero minimum neighbors", g_radius_filter_size);
-        shutdown(SIGINT);
-    }
+    nhp.param(std::string("confidence_threshold"), g_confidence_threshold, 100);
     ////////////////////////////////////////////////////////////////////////////////
     /////       Get the configuration parameters for the color camera          /////
     ////////////////////////////////////////////////////////////////////////////////
