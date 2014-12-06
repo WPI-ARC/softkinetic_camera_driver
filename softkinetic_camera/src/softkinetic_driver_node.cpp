@@ -122,6 +122,7 @@ ros::Publisher g_rgb_pointcloud_pub;
 image_transport::CameraPublisher g_rgb_pub;
 image_transport::CameraPublisher g_depth_pub;
 image_transport::CameraPublisher g_confidence_pub;
+image_transport::CameraPublisher g_registered_depth_pub;
 // Config global variables
 std::string g_rgb_frame_name;
 std::string g_rgb_optical_frame_name;
@@ -217,9 +218,6 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
     // Copy and build the confidences
     int16_t* raw_confidence_shorts = const_cast<int16_t*>(static_cast<const int16_t*>(data.confidenceMap));
     std::vector<int16_t> confidence_shorts(raw_confidence_shorts, raw_confidence_shorts + (width * height));
-    cv::Mat new_image_confidences = cv::Mat(confidence_shorts).reshape(1, height);
-    // Set depth image points with confidence below threshold to NaN
-    ;
     // Filter the depth image
     cv::Mat new_image_depth_filtered(new_image_depth.rows, new_image_depth.cols, CV_32FC1);
     cv::Mat depth_mean_kernel(3, 3, CV_32FC1);
@@ -236,14 +234,6 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
     new_depth_image_camerainfo.header = new_image_header;
     // Publish the image
     g_depth_pub.publish(new_depth_image, new_depth_image_camerainfo);
-//    // Convert the OpenCV confidence image to ROS
-//    sensor_msgs::Image new_confidence_image;
-//    cv_bridge::CvImage new_confidence_image_converted(new_image_header, sensor_msgs::image_encodings::TYPE_16SC1, new_image_confidences);
-//    new_confidence_image_converted.toImageMsg(new_confidence_image);
-//    sensor_msgs::CameraInfo new_confidence_image_camerainfo = g_depth_camerainfo;
-//    new_confidence_image_camerainfo.header = new_image_header;
-//    // Publish the image
-//    g_confidence_pub.publish(new_confidence_image, new_confidence_image_camerainfo);
     // Second, generate the pointcloud
     DepthSense::FPVertex* raw_vertices = const_cast<DepthSense::FPVertex*>(static_cast<const DepthSense::FPVertex*>(data.verticesFloatingPoint));
     std::vector<DepthSense::FPVertex> vertices(raw_vertices, raw_vertices + (width * height));
@@ -316,6 +306,40 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         ros_rgb_pointcloud.header.frame_id = g_depth_optical_frame_name;
         ros_rgb_pointcloud.header.stamp = new_image_header.stamp;
         g_rgb_pointcloud_pub.publish(ros_rgb_pointcloud);
+        // Make the "registered" depth image
+        cv::Mat new_image_depth_registered(new_image_depth.rows, new_image_depth.cols, CV_32FC3, cv::Scalar(0.0, 0.0, 0.0));
+        for (size_t idx = 0; idx < vertices.size(); idx++)
+        {
+            float x = vertices[idx].x;
+            float y = -vertices[idx].y;
+            float z = vertices[idx].z;
+            float u = uv[idx].u;
+            float v = uv[idx].v;
+            if (is_vertex_valid(x, y, z) && is_uv_valid(u, v))
+            {
+                // Filter based on confidence
+                int32_t confidence = (int32_t)confidence_shorts[idx];
+                if (confidence >= g_confidence_threshold)
+                {
+                    // Get the matching position in the image
+                    size_t image_height = (size_t)(v * new_image_depth_registered.rows);
+                    size_t image_width = (size_t)(u * new_image_depth_registered.cols);
+                    // Set that location in the image with the current vertex
+                    new_image_depth_registered.at<cv::Vec3f>(image_height, image_width) = cv::Vec3f(x, y, z);
+                }
+            }
+        }
+        // Convert the "registered" depth image to ROS and publish it
+        std_msgs::Header new_registered_depth_image_header;
+        new_registered_depth_image_header.frame_id = g_depth_optical_frame_name;
+        new_registered_depth_image_header.stamp = ros::Time::now();
+        sensor_msgs::Image new_registed_depth_image;
+        cv_bridge::CvImage new_registered_depth_image_converted(new_registered_depth_image_header, sensor_msgs::image_encodings::TYPE_32FC3, new_image_depth_registered);
+        new_registered_depth_image_converted.toImageMsg(new_registed_depth_image);
+        sensor_msgs::CameraInfo new_registered_depth_image_camerainfo = g_depth_camerainfo;
+        new_registered_depth_image_camerainfo.header = new_registered_depth_image_header;
+        // Publish the image
+        g_registered_depth_pub.publish(new_registed_depth_image, new_registered_depth_image_camerainfo);
     }
     else if (g_color_config.enable_color_map && g_current_color_image.empty())
     {
@@ -906,6 +930,7 @@ int main(int argc, char** argv)
     g_rgb_pub = it.advertiseCamera(camera_name + "/color", 1);
     g_depth_pub = it.advertiseCamera(camera_name + "/depth", 1);
     g_confidence_pub = it.advertiseCamera(camera_name + "/depth_confidence", 1);
+    g_registered_depth_pub = it.advertiseCamera(camera_name + "/registered_depth", 1);
     ////////////////////////////////////////////////////////////////////////////////
     // Initialize the SDK
     g_context = DepthSense::Context::create();
