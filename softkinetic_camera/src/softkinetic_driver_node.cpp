@@ -582,7 +582,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
     }
     catch (resource_retriever::Exception& e)
     {
-        ROS_ERROR("Resource retriever failed to find the file!\n");
+        ROS_ERROR("Resource retriever failed to find the file!");
         return false;
     }
     // Store the loaded resource in a string
@@ -591,7 +591,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
     std::istringstream camera_info_file_stream(resource_string);
     std::string camera_name;
     // Check if the file ends with .yaml
-    if (CheckStringEnding(camera_info_file, ".yaml"))
+    if (CheckStringEnding(camera_info_file, ".yaml") || CheckStringEnding(camera_info_file, ".YAML"))
     {
         bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
         if (yaml_parsed)
@@ -606,7 +606,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
         }
     }
     // Check if the file ends with .yml
-    else if (CheckStringEnding(camera_info_file, ".yml"))
+    else if (CheckStringEnding(camera_info_file, ".yml") || CheckStringEnding(camera_info_file, ".YML"))
     {
         bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
         if (yaml_parsed)
@@ -621,7 +621,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
         }
     }
     // Check if the file ends with .ini
-    else if (CheckStringEnding(camera_info_file, ".ini"))
+    else if (CheckStringEnding(camera_info_file, ".ini") || CheckStringEnding(camera_info_file, ".INI"))
     {
         bool ini_parsed = camera_calibration_parsers::readCalibrationIni(camera_info_file_stream, camera_name, camera_info);
         if (ini_parsed)
