@@ -11,13 +11,13 @@ find_package(DepthSenseSDK)
 catkin_package(CATKIN_DEPENDS roscpp std_msgs pcl_ros cv_bridge image_transport camera_calibration_parsers resource_retriever DEPENDS system_lib DepthSenseSDK)
 
 ## Setup include paths
-include_directories(${catkin_INCLUDE_DIRS} ${DEPTHSENSESDK_INCLUDE_DIRS})
+include_directories(SYSTEM ${catkin_INCLUDE_DIRS} ${DEPTHSENSESDK_INCLUDE_DIRS})
 
 ## Only build driver if we have the DepthSense SDK
 if(DEPTHSENSESDK_FOUND)
   message(STATUS "DepthSense SDK found. Building SoftKinetic camera driver.")
   ## Enable optimizations
-  set(CMAKE_CXX_FLAGS "-std=c++0x ${CMAKE_CXX_FLAGS} -O3")
+  set(CMAKE_CXX_FLAGS "-std=c++0x ${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra")
   ## Build executable
   add_executable(softkinetic_driver_node src/softkinetic_driver_node.cpp)
   add_dependencies(softkinetic_driver_node ${catkin_EXPORTED_TARGETS})

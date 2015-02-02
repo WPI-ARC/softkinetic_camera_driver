@@ -29,6 +29,9 @@
 // Camera SDK include files
 #include <DepthSense.hxx>
 
+// Macro to disable unused parameter compiler warnings
+#define UNUSED(x) (void)(x)
+
 typedef struct
 {
     DepthSense::ColorNode::Configuration base_config;
@@ -92,10 +95,12 @@ cv::Mat g_current_color_image;
 
 void dealocate_pcl_pointcloud_fn(pcl::PointCloud<pcl::PointXYZ>* p)
 {
+    UNUSED(p);
 }
 
 void dealocate_pcl_rgb_pointcloud_fn(pcl::PointCloud<pcl::PointXYZRGB>* p)
 {
+    UNUSED(p);
 }
 
 void SetupCameraInfo(sensor_msgs::CameraInfo& camera_info, const DepthSense::IntrinsicParameters& camera_parameters)
@@ -107,23 +112,24 @@ void SetupCameraInfo(sensor_msgs::CameraInfo& camera_info, const DepthSense::Int
     // Set distortion parameters "D" = [k1, k2, t1, t2, k3] <- for the SoftKinetic API, p1 == t1, p2 == t2
     camera_info.D = {camera_parameters.k1, camera_parameters.k2, camera_parameters.p1, camera_parameters.p2, camera_parameters.k3};
     // Set camera intrinsic matrix "K"
-    camera_info.K = {camera_parameters.fx, 0.0, camera_parameters.cx,
-                     0.0, camera_parameters.fy, camera_parameters.cy,
-                     0.0,                  0.0,                  1.0};
+    camera_info.K = { {camera_parameters.fx, 0.0, camera_parameters.cx,
+                       0.0, camera_parameters.fy, camera_parameters.cy,
+                       0.0,                  0.0,                  1.0} };
     // Set camera rectification matrix "R"
-    camera_info.R = {1.0, 0.0, 0.0,
-                     0.0, 1.0, 0.0,
-                     0.0, 0.0, 1.0};
+    camera_info.R = { {1.0, 0.0, 0.0,
+                       0.0, 1.0, 0.0,
+                       0.0, 0.0, 1.0} };
     // Set projection/camera matrix
     // For monocular cameras like ours, Tx = Ty = 0
     // NOTE - this uses the same values as the raw camera, and assumes no correction is applied
-    camera_info.P = {camera_parameters.fx, 0.0, camera_parameters.cx, 0.0,
-                     0.0, camera_parameters.fy, camera_parameters.cy, 0.0,
-                     0.0,                  0.0,                  1.0, 0.0};
+    camera_info.P = { {camera_parameters.fx, 0.0, camera_parameters.cx, 0.0,
+                       0.0, camera_parameters.fy, camera_parameters.cy, 0.0,
+                       0.0,                  0.0,                  1.0, 0.0} };
 }
 
 void OnNewColorSample(DepthSense::ColorNode node, DepthSense::ColorNode::NewSampleReceivedData data)
 {
+    UNUSED(node);
     // Make new OpenCV container
     int32_t width = 0;
     int32_t height = 0;
@@ -197,6 +203,7 @@ inline bool is_uv_valid(float u, float v)
 
 void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSampleReceivedData data)
 {
+    UNUSED(node);
     // Setup the camerainfo messages if they aren't already populated
     if (g_rgb_camerainfo_set == false)
     {
@@ -503,6 +510,7 @@ void ConfigureColorNode(DepthSense::ColorNode& color_node)
 
 void OnNodeConnected(DepthSense::Device device, DepthSense::Device::NodeAddedData data)
 {
+    UNUSED(device);
     if (data.node.is<DepthSense::DepthNode>())
     {
         g_depth_node = data.node.as<DepthSense::DepthNode>();
@@ -520,6 +528,7 @@ void OnNodeConnected(DepthSense::Device device, DepthSense::Device::NodeAddedDat
 
 void OnNodeRemoved(DepthSense::Device device, DepthSense::Device::NodeRemovedData data)
 {
+    UNUSED(device);
     if (data.node.is<DepthSense::ColorNode>() && (data.node.as<DepthSense::ColorNode>() == g_color_node))
     {
         g_color_node.newSampleReceivedEvent().disconnect(&OnNewColorSample);
@@ -535,11 +544,15 @@ void OnNodeRemoved(DepthSense::Device device, DepthSense::Device::NodeRemovedDat
 
 void OnDeviceConnected(DepthSense::Context context, DepthSense::Context::DeviceAddedData data)
 {
+    UNUSED(context);
+    UNUSED(data);
     ROS_INFO("Device connected");
 }
 
 void OnDeviceRemoved(DepthSense::Context context, DepthSense::Context::DeviceRemovedData data)
 {
+    UNUSED(context);
+    UNUSED(data);
     ROS_ERROR("Device removed");
 }
 
@@ -1031,7 +1044,7 @@ int main(int argc, char** argv)
         ros::shutdown();
         exit(0);
     }
-    if (!(device_index < devices.size()))
+    if (!((size_t)device_index < devices.size()))
     {
         ROS_FATAL("Device index %d is invalid for %zu devices", device_index, devices.size());
         ros::shutdown();
