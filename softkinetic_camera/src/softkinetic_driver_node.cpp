@@ -75,6 +75,7 @@ complete_depth_config g_depth_config;
 // ROS global variables
 ros::Publisher g_pointcloud_pub;
 ros::Publisher g_rgb_pointcloud_pub;
+ros::Publisher g_uv_pointcloud_pub;
 image_transport::CameraPublisher g_rgb_pub;
 image_transport::CameraPublisher g_depth_pub;
 image_transport::CameraPublisher g_confidence_pub;
@@ -280,6 +281,8 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         std::vector<DepthSense::UV> uv(raw_uv, raw_uv + (width * height));
         // Make the XYZRGB pointcloud
         pcl::PointCloud<pcl::PointXYZRGB> pcl_rgb_pointcloud;
+        // Make the matching UV map
+        pcl::PointCloud<pcl::PointUV> pcl_uv_pointcloud;
         for (size_t idx = 0; idx < vertices.size(); idx++)
         {
             float x = vertices[idx].x;
@@ -301,11 +304,16 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
                 if (confidence >= g_confidence_threshold)
                 {
                     // Make the point
-                    pcl::PointXYZRGB new_point(red, green, blue);
-                    new_point.data[0] = x;
-                    new_point.data[1] = y;
-                    new_point.data[2] = z;
-                    pcl_rgb_pointcloud.push_back(new_point);
+                    pcl::PointXYZRGB new_xyzrgb_point(red, green, blue);
+                    new_xyzrgb_point.data[0] = x;
+                    new_xyzrgb_point.data[1] = y;
+                    new_xyzrgb_point.data[2] = z;
+                    pcl_rgb_pointcloud.push_back(new_xyzrgb_point);
+                    // Make the UV
+                    pcl::PointUV new_uv_point;
+                    new_uv_point.u = u;
+                    new_uv_point.v = v;
+                    pcl_uv_pointcloud.push_back(new_uv_point);
                 }
             }
         }
@@ -316,6 +324,12 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         ros_rgb_pointcloud.header.frame_id = g_depth_optical_frame_name;
         ros_rgb_pointcloud.header.stamp = new_image_header.stamp;
         g_rgb_pointcloud_pub.publish(ros_rgb_pointcloud);
+        // Convert the UV pointcloud to ROS message
+        sensor_msgs::PointCloud2 ros_uv_pointcloud;
+        pcl::toROSMsg(pcl_uv_pointcloud, ros_uv_pointcloud);
+        ros_uv_pointcloud.header.frame_id = g_depth_optical_frame_name;
+        ros_uv_pointcloud.header.stamp = new_image_header.stamp;
+        g_uv_pointcloud_pub.publish(ros_uv_pointcloud);
         // Make the "registered" depth image
         cv::Mat new_image_depth_registered(new_image_depth.rows, new_image_depth.cols, CV_32FC3, cv::Scalar(0.0, 0.0, 0.0));
         for (size_t idx = 0; idx < vertices.size(); idx++)
@@ -1025,7 +1039,8 @@ int main(int argc, char** argv)
     ////////////////////////////////////////////////////////////////////////////////
     // Initialize publishers
     g_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_xyz", 1);
-    g_rgb_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_frame + "/points_xyzrgb", 1);
+    g_rgb_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_xyzrgb", 1);
+    g_uv_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_uv", 1);
     g_rgb_pub = it.advertiseCamera(camera_name + "/color", 1);
     g_depth_pub = it.advertiseCamera(camera_name + "/depth", 1);
     g_confidence_pub = it.advertiseCamera(camera_name + "/depth_confidence", 1);
