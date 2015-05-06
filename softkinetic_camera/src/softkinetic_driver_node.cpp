@@ -203,11 +203,6 @@ inline bool is_uv_valid(float u, float v)
     }
 }
 
-inline float convert_confidence_to_float(const int16_t raw_confidence)
-{
-    return (float)raw_confidence / (float)INT16_MAX;
-}
-
 void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSampleReceivedData data)
 {
     UNUSED(node);
