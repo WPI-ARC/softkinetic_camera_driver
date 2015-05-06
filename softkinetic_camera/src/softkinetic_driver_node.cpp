@@ -3,6 +3,7 @@
 /////////////////////////////////////////////////////////
 // System include files
 #include <stdio.h>
+#include <stdint.h>
 #include <signal.h>
 #include <vector>
 #include <exception>
@@ -78,7 +79,7 @@ ros::Publisher g_rgb_pointcloud_pub;
 ros::Publisher g_uv_pointcloud_pub;
 image_transport::CameraPublisher g_rgb_pub;
 image_transport::CameraPublisher g_depth_pub;
-image_transport::CameraPublisher g_confidence_pub;
+image_transport::CameraPublisher g_index_pub;
 image_transport::CameraPublisher g_registered_depth_pub;
 // Config global variables
 std::string g_rgb_frame_name;
@@ -202,6 +203,11 @@ inline bool is_uv_valid(float u, float v)
     }
 }
 
+inline float convert_confidence_to_float(const int16_t raw_confidence)
+{
+    return (float)raw_confidence / (float)INT16_MAX;
+}
+
 void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSampleReceivedData data)
 {
     UNUSED(node);
@@ -249,7 +255,7 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
     DepthSense::FPVertex* raw_vertices = const_cast<DepthSense::FPVertex*>(static_cast<const DepthSense::FPVertex*>(data.verticesFloatingPoint));
     std::vector<DepthSense::FPVertex> vertices(raw_vertices, raw_vertices + (width * height));
     // Make the XYZ pointcloud
-    pcl::PointCloud<pcl::PointXYZ> pcl_pointcloud;
+    pcl::PointCloud<pcl::PointXYZI> pcl_pointcloud;
     for (size_t idx = 0; idx < vertices.size(); idx++)
     {
         float x = vertices[idx].x;
@@ -261,7 +267,11 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
             int32_t confidence = (int32_t)confidence_shorts[idx];
             if (confidence >= g_confidence_threshold)
             {
-                pcl::PointXYZ new_point(x, y, z);
+                pcl::PointXYZI new_point;
+                new_point.x = x;
+                new_point.y = y;
+                new_point.z = z;
+                new_point.intensity = convert_confidence_to_float(confidence);
                 pcl_pointcloud.push_back(new_point);
             }
         }
@@ -304,10 +314,13 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
                 if (confidence >= g_confidence_threshold)
                 {
                     // Make the point
-                    pcl::PointXYZRGB new_xyzrgb_point(red, green, blue);
-                    new_xyzrgb_point.data[0] = x;
-                    new_xyzrgb_point.data[1] = y;
-                    new_xyzrgb_point.data[2] = z;
+                    pcl::PointXYZRGB new_xyzrgb_point;
+                    new_xyzrgb_point.x = x;
+                    new_xyzrgb_point.y = y;
+                    new_xyzrgb_point.z = z;
+                    new_xyzrgb_point.r = red;
+                    new_xyzrgb_point.g = green;
+                    new_xyzrgb_point.b = blue;
                     pcl_rgb_pointcloud.push_back(new_xyzrgb_point);
                     // Make the UV
                     pcl::PointUV new_uv_point;
@@ -332,6 +345,8 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         g_uv_pointcloud_pub.publish(ros_uv_pointcloud);
         // Make the "registered" depth image
         cv::Mat new_image_depth_registered(new_image_depth.rows, new_image_depth.cols, CV_32FC3, cv::Scalar(0.0, 0.0, 0.0));
+        // Make the "index image" that maps pixels in the image to the corresponding index in the pointcloud
+        cv::Mat new_image_depth_indices(new_image_depth.rows, new_image_depth.cols, CV_32SC1, -1);
         for (size_t idx = 0; idx < vertices.size(); idx++)
         {
             float x = vertices[idx].x;
@@ -350,6 +365,7 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
                     size_t image_width = (size_t)(u * new_image_depth_registered.cols);
                     // Set that location in the image with the current vertex
                     new_image_depth_registered.at<cv::Vec3f>(image_height, image_width) = cv::Vec3f(x, y, z);
+                    new_image_depth_indices.at<int32_t>(image_height, image_width) = (int32_t)idx;
                 }
             }
         }
@@ -364,6 +380,17 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         new_registered_depth_image_camerainfo.header = new_registered_depth_image_header;
         // Publish the image
         g_registered_depth_pub.publish(new_registed_depth_image, new_registered_depth_image_camerainfo);
+        // Convert the "index image" to ROS and publish it
+        std_msgs::Header new_indices_depth_image_header;
+        new_indices_depth_image_header.frame_id = g_depth_optical_frame_name;
+        new_indices_depth_image_header.stamp = ros::Time::now();
+        sensor_msgs::Image new_indices_depth_image;
+        cv_bridge::CvImage new_indices_depth_image_converted(new_indices_depth_image_header, sensor_msgs::image_encodings::TYPE_32SC1, new_image_depth_indices);
+        new_indices_depth_image_converted.toImageMsg(new_indices_depth_image);
+        sensor_msgs::CameraInfo new_indices_depth_image_camerainfo = g_depth_camerainfo;
+        new_indices_depth_image_camerainfo.header = new_indices_depth_image_header;
+        // Publish the image
+        g_index_pub.publish(new_indices_depth_image, new_indices_depth_image_camerainfo);
     }
     else if (g_color_config.enable_color_map && g_current_color_image.empty())
     {
@@ -700,6 +727,9 @@ int main(int argc, char** argv)
     ros::NodeHandle nhp("~");
     // Image transport handler (for image compression/decompression)
     image_transport::ImageTransport it(nh);
+    // Async spinner for services and such
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
     ////////////////////////////////////////////////////////////////////////////////
     // Load parameters from the param server
     // TF frame prefix for the whole camera
@@ -1053,7 +1083,7 @@ int main(int argc, char** argv)
     g_uv_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_uv", 1);
     g_rgb_pub = it.advertiseCamera(camera_name + "/color", 1);
     g_depth_pub = it.advertiseCamera(camera_name + "/depth", 1);
-    g_confidence_pub = it.advertiseCamera(camera_name + "/depth_confidence", 1);
+    g_index_pub = it.advertiseCamera(camera_name + "/depth_indices", 1);
     g_registered_depth_pub = it.advertiseCamera(camera_name + "/registered_depth", 1);
     ////////////////////////////////////////////////////////////////////////////////
     // Initialize the SDK
@@ -1182,7 +1212,10 @@ int main(int argc, char** argv)
         g_context.releaseControl(g_depth_node);
         g_context.unregisterNode(g_depth_node);
     }
-    ros::shutdown();
+    g_rgb_pub.shutdown();
+    g_depth_pub.shutdown();
+    g_index_pub.shutdown();
+    g_registered_depth_pub.shutdown();
     std::cout << "...exiting!" << std::endl;
     return 0;
 }
