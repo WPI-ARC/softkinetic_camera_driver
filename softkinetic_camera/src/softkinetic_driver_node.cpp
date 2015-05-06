@@ -211,6 +211,7 @@ inline float convert_confidence_to_float(const int16_t raw_confidence)
 void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSampleReceivedData data)
 {
     UNUSED(node);
+    ros::Time depth_timestamp = ros::Time::now();
     // Setup the camerainfo messages if they aren't already populated
     if (g_rgb_camerainfo_set == false)
     {
@@ -243,7 +244,7 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
     // Convert the OpenCV depth image to ROS
     std_msgs::Header new_image_header;
     new_image_header.frame_id = g_depth_optical_frame_name;
-    new_image_header.stamp = ros::Time::now();
+    new_image_header.stamp = depth_timestamp;
     sensor_msgs::Image new_depth_image;
     cv_bridge::CvImage new_depth_image_converted(new_image_header, sensor_msgs::image_encodings::TYPE_32FC1, new_image_depth_filtered);
     new_depth_image_converted.toImageMsg(new_depth_image);
@@ -335,13 +336,13 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         sensor_msgs::PointCloud2 ros_rgb_pointcloud;
         pcl::toROSMsg(pcl_rgb_pointcloud, ros_rgb_pointcloud);
         ros_rgb_pointcloud.header.frame_id = g_depth_optical_frame_name;
-        ros_rgb_pointcloud.header.stamp = new_image_header.stamp;
+        ros_rgb_pointcloud.header.stamp = depth_timestamp;
         g_rgb_pointcloud_pub.publish(ros_rgb_pointcloud);
         // Convert the UV pointcloud to ROS message
         sensor_msgs::PointCloud2 ros_uv_pointcloud;
         pcl::toROSMsg(pcl_uv_pointcloud, ros_uv_pointcloud);
         ros_uv_pointcloud.header.frame_id = g_depth_optical_frame_name;
-        ros_uv_pointcloud.header.stamp = new_image_header.stamp;
+        ros_uv_pointcloud.header.stamp = depth_timestamp;
         g_uv_pointcloud_pub.publish(ros_uv_pointcloud);
         // Make the "registered" depth image
         cv::Mat new_image_depth_registered(new_image_depth.rows, new_image_depth.cols, CV_32FC3, cv::Scalar(0.0, 0.0, 0.0));
@@ -372,7 +373,7 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         // Convert the "registered" depth image to ROS and publish it
         std_msgs::Header new_registered_depth_image_header;
         new_registered_depth_image_header.frame_id = g_depth_optical_frame_name;
-        new_registered_depth_image_header.stamp = ros::Time::now();
+        new_registered_depth_image_header.stamp = depth_timestamp;
         sensor_msgs::Image new_registed_depth_image;
         cv_bridge::CvImage new_registered_depth_image_converted(new_registered_depth_image_header, sensor_msgs::image_encodings::TYPE_32FC3, new_image_depth_registered);
         new_registered_depth_image_converted.toImageMsg(new_registed_depth_image);
@@ -383,7 +384,7 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         // Convert the "index image" to ROS and publish it
         std_msgs::Header new_indices_depth_image_header;
         new_indices_depth_image_header.frame_id = g_depth_optical_frame_name;
-        new_indices_depth_image_header.stamp = ros::Time::now();
+        new_indices_depth_image_header.stamp = depth_timestamp;
         sensor_msgs::Image new_indices_depth_image;
         cv_bridge::CvImage new_indices_depth_image_converted(new_indices_depth_image_header, sensor_msgs::image_encodings::TYPE_32SC1, new_image_depth_indices);
         new_indices_depth_image_converted.toImageMsg(new_indices_depth_image);
