@@ -272,7 +272,7 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
                 new_point.x = x;
                 new_point.y = y;
                 new_point.z = z;
-                new_point.intensity = convert_confidence_to_float(confidence);
+                new_point.intensity = (float)confidence;
                 pcl_pointcloud.push_back(new_point);
             }
         }
@@ -1079,7 +1079,7 @@ int main(int argc, char** argv)
     }
     ////////////////////////////////////////////////////////////////////////////////
     // Initialize publishers
-    g_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_xyz", 1);
+    g_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_xyzconfidence", 1);
     g_rgb_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_xyzrgb", 1);
     g_uv_pointcloud_pub = nh.advertise<sensor_msgs::PointCloud2>(camera_name + "/points_uv", 1);
     g_rgb_pub = it.advertiseCamera(camera_name + "/color", 1);
