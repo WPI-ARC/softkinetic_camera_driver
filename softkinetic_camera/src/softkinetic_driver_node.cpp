@@ -342,26 +342,34 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         // Make the "registered" depth image
         cv::Mat new_image_depth_registered(new_image_depth.rows, new_image_depth.cols, CV_32FC3, cv::Scalar(0.0, 0.0, 0.0));
         // Make the "index image" that maps pixels in the image to the corresponding index in the pointcloud
-        cv::Mat new_image_depth_indices(new_image_depth.rows, new_image_depth.cols, CV_32SC1, -1);
+        cv::Mat new_image_depth_indices(new_image_depth.rows, new_image_depth.cols, CV_32SC2, cv::Scalar(-1, -1));
+        int32_t xyz_filtered_vertex_index = 0;
+        int32_t uv_and_xyz_filtered_vertex_index = 0;
         for (size_t idx = 0; idx < vertices.size(); idx++)
         {
-            float x = vertices[idx].x;
-            float y = -vertices[idx].y;
-            float z = vertices[idx].z;
-            float u = uv[idx].u;
-            float v = uv[idx].v;
-            if (is_vertex_valid(x, y, z) && is_uv_valid(u, v))
+            // Filter based on confidence
+            int32_t confidence = (int32_t)confidence_shorts[idx];
+            if (confidence >= g_confidence_threshold)
             {
-                // Filter based on confidence
-                int32_t confidence = (int32_t)confidence_shorts[idx];
-                if (confidence >= g_confidence_threshold)
+                float x = vertices[idx].x;
+                float y = -vertices[idx].y;
+                float z = vertices[idx].z;
+                float u = uv[idx].u;
+                float v = uv[idx].v;
+                if (is_vertex_valid(x, y, z))
                 {
-                    // Get the matching position in the image
-                    size_t image_height = (size_t)(v * new_image_depth_registered.rows);
-                    size_t image_width = (size_t)(u * new_image_depth_registered.cols);
-                    // Set that location in the image with the current vertex
-                    new_image_depth_registered.at<cv::Vec3f>(image_height, image_width) = cv::Vec3f(x, y, z);
-                    new_image_depth_indices.at<int32_t>(image_height, image_width) = (int32_t)idx;
+                    if (is_uv_valid(u, v))
+                    {
+
+                            // Get the matching position in the image
+                            size_t image_height = (size_t)(v * new_image_depth_registered.rows);
+                            size_t image_width = (size_t)(u * new_image_depth_registered.cols);
+                            // Set that location in the image with the current vertex
+                            new_image_depth_registered.at<cv::Vec3f>(image_height, image_width) = cv::Vec3f(x, y, z);
+                            new_image_depth_indices.at<cv::Vec2i>(image_height, image_width) = cv::Vec2i(xyz_filtered_vertex_index, uv_and_xyz_filtered_vertex_index);
+                            uv_and_xyz_filtered_vertex_index++;
+                    }
+                    xyz_filtered_vertex_index++;
                 }
             }
         }
@@ -381,7 +389,7 @@ void OnNewDepthSample(DepthSense::DepthNode node, DepthSense::DepthNode::NewSamp
         new_indices_depth_image_header.frame_id = g_depth_optical_frame_name;
         new_indices_depth_image_header.stamp = depth_timestamp;
         sensor_msgs::Image new_indices_depth_image;
-        cv_bridge::CvImage new_indices_depth_image_converted(new_indices_depth_image_header, sensor_msgs::image_encodings::TYPE_32SC1, new_image_depth_indices);
+        cv_bridge::CvImage new_indices_depth_image_converted(new_indices_depth_image_header, sensor_msgs::image_encodings::TYPE_32SC2, new_image_depth_indices);
         new_indices_depth_image_converted.toImageMsg(new_indices_depth_image);
         sensor_msgs::CameraInfo new_indices_depth_image_camerainfo = g_depth_camerainfo;
         new_indices_depth_image_camerainfo.header = new_indices_depth_image_header;
