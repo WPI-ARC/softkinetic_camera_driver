@@ -143,7 +143,7 @@ void OnNewColorSample(DepthSense::ColorNode node, DepthSense::ColorNode::NewSamp
         // Make the intermediate container for the YUY2 image
         cv::Mat new_image_yuy2(height, width, CV_8UC2);
         // Copy the data in
-        new_image_yuy2.data = const_cast<u_int8_t*>(static_cast<const u_int8_t*>(data.colorMap));
+        new_image_yuy2.data = const_cast<uint8_t*>(static_cast<const uint8_t*>(data.colorMap));
         // Convert to BGR
         cv::cvtColor(new_image_yuy2, new_image_bgr8, CV_YUV2BGR_YUY2);
     }
@@ -151,7 +151,7 @@ void OnNewColorSample(DepthSense::ColorNode node, DepthSense::ColorNode::NewSamp
     else
     {
         // Copy the data in
-        new_image_bgr8.data = const_cast<u_int8_t*>(static_cast<const u_int8_t*>(data.colorMap));
+        new_image_bgr8.data = const_cast<uint8_t*>(static_cast<const uint8_t*>(data.colorMap));
     }
     // Save the current color image
     g_current_color_image = new_image_bgr8.clone();
@@ -651,7 +651,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
     // Check if the file ends with .yaml
     if (CheckStringEnding(camera_info_file, ".yaml") || CheckStringEnding(camera_info_file, ".YAML"))
     {
-        bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
+        const bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
         if (yaml_parsed)
         {
             ROS_INFO("Successfully loaded camera info file as YAML");
@@ -666,7 +666,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
     // Check if the file ends with .yml
     else if (CheckStringEnding(camera_info_file, ".yml") || CheckStringEnding(camera_info_file, ".YML"))
     {
-        bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
+        const bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
         if (yaml_parsed)
         {
             ROS_INFO("Successfully loaded camera info file as YAML");
@@ -681,7 +681,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
     // Check if the file ends with .ini
     else if (CheckStringEnding(camera_info_file, ".ini") || CheckStringEnding(camera_info_file, ".INI"))
     {
-        bool ini_parsed = camera_calibration_parsers::readCalibrationIni(camera_info_file_stream, camera_name, camera_info);
+        const bool ini_parsed = camera_calibration_parsers::readCalibrationIni(camera_info_file_stream, camera_name, camera_info);
         if (ini_parsed)
         {
             ROS_INFO("Sucessfully loaded camera info file as INI");
@@ -696,7 +696,7 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
     // If we can't tell which type it is, just go for it
     else
     {
-        bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
+        const bool yaml_parsed = camera_calibration_parsers::readCalibrationYml(camera_info_file_stream, camera_name, camera_info);
         if (yaml_parsed)
         {
             ROS_INFO("Successfully loaded unknown camera info file as YAML");
@@ -705,16 +705,16 @@ bool LoadCameraInfoFromFile(sensor_msgs::CameraInfo& camera_info, std::string ca
         else
         {
             ROS_ERROR("Failed to load unknown camera info file as YAML");
-        }
-        bool ini_parsed = camera_calibration_parsers::readCalibrationIni(camera_info_file_stream, camera_name, camera_info);
-        if (ini_parsed)
-        {
-            ROS_INFO("Sucessfully loaded unknown camera info file as INI");
-            return true;
-        }
-        else
-        {
-            ROS_ERROR("Failed to load unknown camera info file as INI");
+            const bool ini_parsed = camera_calibration_parsers::readCalibrationIni(camera_info_file_stream, camera_name, camera_info);
+            if (ini_parsed)
+            {
+                ROS_INFO("Sucessfully loaded unknown camera info file as INI");
+                return true;
+            }
+            else
+            {
+                ROS_ERROR("Failed to load unknown camera info file as INI");
+            }
         }
         return false;
     }
